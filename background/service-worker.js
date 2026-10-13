@@ -44,7 +44,7 @@ async function getActiveTab() {
   return tab;
 }
 
-const CONTENT_SCRIPT_VERSION = 8;
+const CONTENT_SCRIPT_VERSION = 9;
 
 async function ensureContentScript(tabId) {
   let needsInject = true;
@@ -113,12 +113,28 @@ async function saveCaptureResult(result) {
   return result;
 }
 
+async function expandCollapsedIfNeeded(tabId, targetId, enabled) {
+  if (!enabled) return null;
+  const result = await chrome.tabs.sendMessage(tabId, {
+    type: "EXPAND_COLLAPSED",
+    targetId
+  });
+  if (!result?.ok) {
+    throw new Error(result?.error || "No se pudo desplegar el contenido oculto.");
+  }
+  return result.expanded || null;
+}
+
 async function startTextCapture(payload) {
   const tab = await getActiveTab();
   await ensureContentScript(tab.id);
 
   const targetId = payload?.targetId ?? "document";
   const reverseOrder = Boolean(payload?.reverseTextOrder);
+  const expandCollapsed = payload?.expandCollapsed !== false;
+
+  await expandCollapsedIfNeeded(tab.id, targetId, expandCollapsed);
+
   const extracted = await chrome.tabs.sendMessage(tab.id, {
     type: "EXTRACT_TEXT",
     targetId,
@@ -252,6 +268,10 @@ async function startImageCapture(payload) {
   const targetId = payload?.targetId ?? "document";
   const hideFixedOverlays = payload?.hideFixedOverlays !== false;
   const expandSliders = Boolean(payload?.expandSliders);
+  const expandCollapsed = payload?.expandCollapsed !== false;
+
+  // Expand first so height metrics and sliders see the full content.
+  await expandCollapsedIfNeeded(tab.id, targetId, expandCollapsed);
 
   let sliderStrips = [];
   if (expandSliders) {

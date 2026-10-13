@@ -3,6 +3,7 @@ const scaleRange = document.getElementById("scaleRange");
 const scaleValue = document.getElementById("scaleValue");
 const hideFixed = document.getElementById("hideFixed");
 const expandSliders = document.getElementById("expandSliders");
+const expandCollapsed = document.getElementById("expandCollapsed");
 const reverseText = document.getElementById("reverseText");
 const scalePanel = document.getElementById("scalePanel");
 const textPanel = document.getElementById("textPanel");
@@ -37,6 +38,9 @@ async function init() {
   });
   reverseText.addEventListener("change", () => {
     chrome.storage.local.set({ fineCaptureReverseText: reverseText.checked });
+  });
+  expandCollapsed.addEventListener("change", () => {
+    chrome.storage.local.set({ fineCaptureExpandCollapsed: expandCollapsed.checked });
   });
   document.querySelectorAll('input[name="captureMode"]').forEach((el) => {
     el.addEventListener("change", onModeChange);
@@ -74,7 +78,8 @@ async function init() {
     "fineCaptureHideFixed",
     "fineCaptureMode",
     "fineCaptureExpandSliders",
-    "fineCaptureReverseText"
+    "fineCaptureReverseText",
+    "fineCaptureExpandCollapsed"
   ]);
   if (typeof prefs.fineCaptureHideFixed === "boolean") {
     hideFixed.checked = prefs.fineCaptureHideFixed;
@@ -84,6 +89,9 @@ async function init() {
   }
   if (typeof prefs.fineCaptureReverseText === "boolean") {
     reverseText.checked = prefs.fineCaptureReverseText;
+  }
+  if (typeof prefs.fineCaptureExpandCollapsed === "boolean") {
+    expandCollapsed.checked = prefs.fineCaptureExpandCollapsed;
   }
   if (prefs.fineCaptureMode === "text" || prefs.fineCaptureMode === "image") {
     const radio = document.querySelector(`input[name="captureMode"][value="${prefs.fineCaptureMode}"]`);
@@ -129,7 +137,7 @@ async function getActiveTab() {
   return tab;
 }
 
-const CONTENT_SCRIPT_VERSION = 8;
+const CONTENT_SCRIPT_VERSION = 9;
 
 async function ensureContent(tabId) {
   let needsInject = true;
@@ -223,7 +231,8 @@ async function runCapture() {
         scale: Number(scaleRange.value),
         hideFixedOverlays: hideFixed.checked,
         expandSliders: expandSliders.checked,
-        reverseTextOrder: reverseText.checked
+        reverseTextOrder: reverseText.checked,
+        expandCollapsed: expandCollapsed.checked
       }
     });
 

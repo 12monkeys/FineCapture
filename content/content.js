@@ -1,5 +1,5 @@
 (() => {
-  const FC_VERSION = 8;
+  const FC_VERSION = 9;
   if (window.__FC__?.version === FC_VERSION) return;
   if (window.__FC__?.onMessage) {
     chrome.runtime.onMessage.removeListener(window.__FC__.onMessage);
@@ -48,8 +48,11 @@
         return { ok: true };
       case "EXTRACT_TEXT":
         return extractTextCapture(message.targetId, {
-          reverseOrder: Boolean(message.reverseOrder)
+          reverseOrder: Boolean(message.reverseOrder),
+          expandCollapsed: Boolean(message.expandCollapsed)
         });
+      case "EXPAND_COLLAPSED":
+        return expandCollapsedContent(message.targetId);
       case "FIND_SLIDERS":
         return findSlidersInTarget(message.targetId);
       case "SLIDER_GO_TO":
@@ -1057,6 +1060,135 @@
     };
   }
 
+  const EXPAND_TEXT_RE =
+    /^\s*(ver m[aá]s|mostrar m[aá]s|ver todo|mostrar todo|leer m[aá]s|expandir|desplegar|show more|see more|read more|view more|load more|show all|see all|expand|more)\s*$/i;
+  const EXPAND_CONTAINS_RE =
+    /\b(ver m[aá]s|mostrar m[aá]s|leer m[aá]s|show more|see more|read more|load more|view more)\b/i;
+  const EXPAND_SKIP_RE =
+    /\b(cerrar|close|cancel|login|log in|sign in|sign up|register|cookie|aceptar todo|reject|decline|comprar|buy|share|compartir|siguiente|next|prev|anterior)\b/i;
+
+  function isSafeExpandControl(el) {
+    if (!(el instanceof HTMLElement) || isFineCaptureUi(el)) return false;
+    if (!isVisibleForText(el) && el.tagName !== "SUMMARY") {
+      // summary can be visible even if details content is hidden
+      const rect = el.getBoundingClientRect();
+      if (rect.width < 2 || rect.height < 2) return false;
+    }
+    if (el.disabled || el.getAttribute("aria-disabled") === "true") return false;
+    if (el.closest("form") && (el.type === "submit" || el.getAttribute("type") === "submit")) return false;
+
+    const tag = el.tagName;
+    if (tag === "A") {
+      const href = el.getAttribute("href") || "";
+      if (href && !href.startsWith("#") && !href.startsWith("javascript:") && href !== "") {
+        // Allow in-page hash only; skip real navigations.
+        if (/^https?:/i.test(href) || href.startsWith("/") || href.startsWith("mailto:")) return false;
+      }
+    }
+
+    const label = normalizeSpace(
+      `${el.innerText || ""} ${el.getAttribute("aria-label") || ""} ${el.title || ""} ${el.getAttribute("data-testid") || ""}`
+    );
+    if (EXPAND_SKIP_RE.test(label)) return false;
+    return true;
+  }
+
+  function controlledPanelIsCollapsed(control) {
+    const id = control.getAttribute("aria-controls");
+    if (!id) return null;
+    const panel = document.getElementById(id);
+    if (!panel) return null;
+    const style = getComputedStyle(panel);
+    if (panel.hidden || panel.getAttribute("aria-hidden") === "true") return true;
+    if (style.display === "none" || style.visibility === "hidden") return true;
+    if (style.maxHeight === "0px" || style.height === "0px") return true;
+    return false;
+  }
+
+  function collectExpandTargets(root) {
+    const targets = [];
+    const seen = new Set();
+
+    const add = (el, reason) => {
+      if (!el || seen.has(el) || !isSafeExpandControl(el)) return;
+      seen.add(el);
+      targets.push({ el, reason });
+    };
+
+    root.querySelectorAll("details:not([open]) > summary").forEach((el) => add(el, "details"));
+
+    root.querySelectorAll('[aria-expanded="false"]').forEach((el) => {
+      if (!isSafeExpandControl(el)) return;
+      const collapsed = controlledPanelIsCollapsed(el);
+      if (collapsed === false) return;
+      add(el, "aria-expanded");
+    });
+
+    root.querySelectorAll("button, a, [role='button'], summary, span[tabindex], div[tabindex]").forEach((el) => {
+      if (!(el instanceof HTMLElement)) return;
+      const label = normalizeSpace(
+        `${el.innerText || ""} ${el.getAttribute("aria-label") || ""} ${el.title || ""}`
+      );
+      if (!label || label.length > 48) return;
+      if (EXPAND_TEXT_RE.test(label) || (label.length <= 24 && EXPAND_CONTAINS_RE.test(label))) {
+        add(el, "label");
+      }
+    });
+
+    root.querySelectorAll(
+      '[class*="show-more" i], [class*="showMore" i], [class*="read-more" i], [class*="readMore" i], [class*="ver-mas" i], [class*="verMas" i], [data-action*="expand" i], [data-testid*="show-more" i], [data-testid*="read-more" i]'
+    ).forEach((el) => add(el, "class"));
+
+    return targets;
+  }
+
+  async function expandCollapsedContent(targetId) {
+    const target = resolveTarget(targetId || "document");
+    const root = target.kind === "document"
+      ? (document.body || document.documentElement)
+      : target.el;
+    if (!root) return { ok: false, error: "Sin nodo para expandir." };
+
+    // Native details first (no click needed).
+    let openedDetails = 0;
+    root.querySelectorAll("details:not([open])").forEach((details) => {
+      details.open = true;
+      openedDetails += 1;
+    });
+
+    let clicked = 0;
+    const maxClicks = 40;
+    const maxPasses = 4;
+
+    for (let pass = 0; pass < maxPasses && clicked < maxClicks; pass += 1) {
+      const batch = collectExpandTargets(root);
+      if (!batch.length) break;
+
+      for (const item of batch) {
+        if (clicked >= maxClicks) break;
+        try {
+          if (item.el.getAttribute("aria-expanded") === "true") continue;
+          if (item.el.closest("details[open]") && item.el.tagName === "SUMMARY") continue;
+          item.el.click();
+          clicked += 1;
+          await new Promise((r) => setTimeout(r, 90));
+        } catch {
+          /* ignore failed clicks */
+        }
+      }
+
+      await new Promise((r) => setTimeout(r, 160));
+    }
+
+    return {
+      ok: true,
+      expanded: {
+        details: openedDetails,
+        clicks: clicked
+      }
+    };
+  }
+
   function extractTextCapture(targetId, options = {}) {
     const reverseOrder = Boolean(options.reverseOrder);
     const target = resolveTarget(targetId || "document");
@@ -1067,6 +1199,8 @@
     if (!root) {
       return { ok: false, error: "No se encontró el nodo para extraer texto." };
     }
+
+    // expandCollapsed is handled by background before EXTRACT_TEXT when requested.
 
     const markdown = extractStructuredText(root, { markdown: true, reverseOrder });
     const text = extractStructuredText(root, { markdown: false, reverseOrder });
