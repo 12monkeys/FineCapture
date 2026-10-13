@@ -2,12 +2,16 @@ const targetSelect = document.getElementById("targetSelect");
 const scaleRange = document.getElementById("scaleRange");
 const scaleValue = document.getElementById("scaleValue");
 const hideFixed = document.getElementById("hideFixed");
+const scalePanel = document.getElementById("scalePanel");
+const cleanPanel = document.getElementById("cleanPanel");
+const modeHint = document.getElementById("modeHint");
 const statusEl = document.getElementById("status");
 const progressWrap = document.getElementById("progressWrap");
 const progressBar = document.getElementById("progressBar");
 const captureBtn = document.getElementById("captureBtn");
 const miniPreview = document.getElementById("miniPreview");
 const thumb = document.getElementById("thumb");
+const textThumb = document.getElementById("textThumb");
 const dims = document.getElementById("dims");
 
 let selectedTargetId = "document";
@@ -24,6 +28,9 @@ async function init() {
   captureBtn.addEventListener("click", runCapture);
   hideFixed.addEventListener("change", () => {
     chrome.storage.local.set({ fineCaptureHideFixed: hideFixed.checked });
+  });
+  document.querySelectorAll('input[name="captureMode"]').forEach((el) => {
+    el.addEventListener("change", onModeChange);
   });
   targetSelect.addEventListener("change", () => {
     selectedTargetId = targetSelect.value;
@@ -53,13 +60,37 @@ async function init() {
     selectedTargetId = stored.fineCaptureSelectedTarget;
   }
 
-  const prefs = await chrome.storage.local.get("fineCaptureHideFixed");
+  const prefs = await chrome.storage.local.get(["fineCaptureHideFixed", "fineCaptureMode"]);
   if (typeof prefs.fineCaptureHideFixed === "boolean") {
     hideFixed.checked = prefs.fineCaptureHideFixed;
   }
+  if (prefs.fineCaptureMode === "text" || prefs.fineCaptureMode === "image") {
+    const radio = document.querySelector(`input[name="captureMode"][value="${prefs.fineCaptureMode}"]`);
+    if (radio) radio.checked = true;
+  }
 
+  syncModeUi();
   await loadTargets();
   await showLastCapture();
+}
+
+function getMode() {
+  return document.querySelector('input[name="captureMode"]:checked')?.value || "image";
+}
+
+function onModeChange() {
+  chrome.storage.local.set({ fineCaptureMode: getMode() });
+  syncModeUi();
+}
+
+function syncModeUi() {
+  const textMode = getMode() === "text";
+  scalePanel.classList.toggle("hidden", textMode);
+  cleanPanel.classList.toggle("hidden", textMode);
+  captureBtn.textContent = textMode ? "Extraer texto" : "Capturar";
+  modeHint.textContent = textMode
+    ? "Extrae solo el texto del DOM de la zona (ideal para chats). Respeta títulos y bloques."
+    : "Captura visual con scroll automático.";
 }
 
 function syncScaleLabel() {
@@ -76,7 +107,7 @@ async function getActiveTab() {
   return tab;
 }
 
-const CONTENT_SCRIPT_VERSION = 4;
+const CONTENT_SCRIPT_VERSION = 5;
 
 async function ensureContent(tabId) {
   let needsInject = true;
@@ -157,13 +188,15 @@ async function runCapture() {
   captureBtn.disabled = true;
   progressWrap.classList.remove("hidden");
   progressBar.style.width = "0%";
-  setStatus("Preparando captura…");
+  const mode = getMode();
+  setStatus(mode === "text" ? "Extrayendo texto…" : "Preparando captura…");
 
   try {
     selectedTargetId = targetSelect.value;
     const response = await chrome.runtime.sendMessage({
       type: "START_CAPTURE",
       payload: {
+        mode,
         targetId: selectedTargetId,
         scale: Number(scaleRange.value),
         hideFixedOverlays: hideFixed.checked
@@ -172,7 +205,7 @@ async function runCapture() {
 
     if (!response?.ok) throw new Error(response?.error || "Captura fallida.");
     renderPreview(response.result);
-    setStatus("Captura lista.", "ok");
+    setStatus(mode === "text" ? "Texto extraído." : "Captura lista.", "ok");
     progressBar.style.width = "100%";
   } catch (error) {
     setStatus(String(error.message || error), "error");
@@ -190,8 +223,18 @@ async function showLastCapture() {
 
 function renderPreview(result) {
   miniPreview.classList.remove("hidden");
-  thumb.src = result.dataUrl;
-  dims.textContent = `${result.width}×${result.height} · ${result.scalePercent}%`;
+  const isText = result.kind === "text";
+
+  thumb.classList.toggle("hidden", isText);
+  textThumb.classList.toggle("hidden", !isText);
+
+  if (isText) {
+    textThumb.textContent = result.text.slice(0, 1200) + (result.text.length > 1200 ? "…" : "");
+    dims.textContent = `${result.charCount} chars · ${result.lineCount} líneas`;
+  } else {
+    thumb.src = result.dataUrl;
+    dims.textContent = `${result.width}×${result.height} · ${result.scalePercent}%`;
+  }
 }
 
 async function openPreview() {

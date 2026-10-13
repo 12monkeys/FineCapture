@@ -17,25 +17,38 @@
         </div>
       </div>
 
-      <label class="block">
-        <span>Formato de descarga</span>
-        <div class="formats" role="radiogroup" aria-label="Formato">
-          <label><input type="radio" name="format" value="png" checked /> PNG</label>
-          <label><input type="radio" name="format" value="jpeg" /> JPG</label>
-          <label><input type="radio" name="format" value="webp" /> WebP</label>
-        </div>
-      </label>
+      <div id="imageControls">
+        <label class="block">
+          <span>Formato de descarga</span>
+          <div class="formats" role="radiogroup" aria-label="Formato">
+            <label><input type="radio" name="format" value="png" checked /> PNG</label>
+            <label><input type="radio" name="format" value="jpeg" /> JPG</label>
+            <label><input type="radio" name="format" value="webp" /> WebP</label>
+          </div>
+        </label>
 
-      <label class="block" id="qualityBlock">
-        <span>Calidad JPG/WebP <strong id="qualityLabel">0.92</strong></span>
-        <input type="range" id="quality" min="0.5" max="1" step="0.01" value="0.92" />
-      </label>
+        <label class="block" id="qualityBlock">
+          <span>Calidad JPG/WebP <strong id="qualityLabel">0.92</strong></span>
+          <input type="range" id="quality" min="0.5" max="1" step="0.01" value="0.92" />
+        </label>
 
-      <label class="block">
-        <span>Escala de exportación <strong id="exportScaleLabel">100%</strong></span>
-        <p class="hint">Parte de la imagen capturada. 100% mantiene el tamaño actual; baja hasta 10% para aligerar el archivo.</p>
-        <input type="range" id="exportScale" min="10" max="100" step="5" value="100" />
-      </label>
+        <label class="block">
+          <span>Escala de exportación <strong id="exportScaleLabel">100%</strong></span>
+          <p class="hint">Parte de la imagen capturada. 100% mantiene el tamaño actual; baja hasta 10% para aligerar el archivo.</p>
+          <input type="range" id="exportScale" min="10" max="100" step="5" value="100" />
+        </label>
+      </div>
+
+      <div id="textControls" class="hidden">
+        <label class="block">
+          <span>Formato de descarga</span>
+          <div class="formats" role="radiogroup" aria-label="Formato de texto">
+            <label><input type="radio" name="textFormat" value="txt" checked /> TXT</label>
+            <label><input type="radio" name="textFormat" value="md" /> Markdown</label>
+          </div>
+        </label>
+        <p class="hint">El texto sale solo del DOM de la zona elegida, manteniendo títulos y bloques.</p>
+      </div>
 
       <div class="stats">
         <div><span>Origen</span><strong id="statSource">—</strong></div>
@@ -44,6 +57,7 @@
       </div>
 
       <button type="button" id="downloadBtn" class="primary" disabled>Descargar</button>
+      <button type="button" id="copyBtn" class="secondary hidden">Copiar texto</button>
       <button type="button" id="recaptureHint" class="ghost">Vuelve al popup de la extensión para una nueva captura</button>
     </aside>
 
@@ -52,6 +66,7 @@
       <div id="previewWrap" class="preview-wrap hidden">
         <img id="previewImage" alt="Vista previa de la captura completa" />
       </div>
+      <pre id="textPreview" class="text-preview hidden"></pre>
     </main>
   </div>
   <script type="module" src="preview.js"></script>

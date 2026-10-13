@@ -18,6 +18,23 @@
 
     <section class="panel">
       <div class="section-head">
+        <h2>Modo</h2>
+      </div>
+      <div class="modes" role="radiogroup" aria-label="Modo de captura">
+        <label class="mode">
+          <input type="radio" name="captureMode" value="image" checked />
+          <span>Imagen</span>
+        </label>
+        <label class="mode">
+          <input type="radio" name="captureMode" value="text" />
+          <span>Solo texto</span>
+        </label>
+      </div>
+      <p class="hint" id="modeHint">Captura visual con scroll automático.</p>
+    </section>
+
+    <section class="panel">
+      <div class="section-head">
         <h2>Zona a capturar</h2>
         <button type="button" id="refreshTargets" class="ghost">Actualizar</button>
       </div>
@@ -28,7 +45,7 @@
       <button type="button" id="pickOnPage" class="secondary">Elegir en la página</button>
     </section>
 
-    <section class="panel">
+    <section class="panel" id="scalePanel">
       <div class="section-head">
         <h2>Escala de salida</h2>
         <span id="scaleValue" class="pill">100%</span>
@@ -38,7 +55,7 @@
       <div class="scale-ends"><span>10%</span><span>100%</span></div>
     </section>
 
-    <section class="panel">
+    <section class="panel" id="cleanPanel">
       <div class="section-head">
         <h2>Limpieza</h2>
       </div>
@@ -65,6 +82,7 @@
         <span id="dims" class="pill"></span>
       </div>
       <img id="thumb" alt="Vista previa de la captura" />
+      <pre id="textThumb" class="text-thumb hidden"></pre>
       <button type="button" id="openPreview" class="secondary">Abrir preview y descargar</button>
     </section>
   </div>

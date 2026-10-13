@@ -6,9 +6,10 @@ Extensión de Chrome (Manifest V3) para capturar páginas o regiones con scroll 
 
 1. Detecta la página completa y los contenedores del DOM con scroll.
 2. Permite elegir la zona desde el popup o haciendo clic en la página.
-3. Hace scroll automático, captura por tramos y une el resultado.
-4. Abre un preview para decidir formato (PNG / JPG / WebP) y escala de exportación (10%–100%).
-5. Antes de capturar puedes fijar la escala de salida (100% = 1:1).
+3. Modo **Imagen**: scroll automático, captura por tramos y une el resultado.
+4. Modo **Solo texto**: extrae el texto visible del DOM de esa zona (ideal para chats), conservando títulos y bloques; exporta TXT o Markdown.
+5. Abre un preview para descargar imagen (PNG / JPG / WebP) o texto (TXT / MD).
+6. En modo imagen puedes fijar la escala de salida (100% = 1:1) y ocultar overlays flotantes.
 
 ## Instalación
 
@@ -22,9 +23,10 @@ Extensión de Chrome (Manifest V3) para capturar páginas o regiones con scroll 
 1. Abre la pestaña que quieras capturar.
 2. Pulsa el icono de FineCapture.
 3. Elige la zona (lista o «Elegir en la página»).
-4. Ajusta la escala 10%–100%.
-5. Pulsa **Capturar**.
-6. Abre el preview y descarga en el formato deseado.
+4. Elige modo **Imagen** o **Solo texto**.
+5. En imagen, ajusta la escala 10%–100% y la limpieza de overlays.
+6. Pulsa **Capturar** / **Extraer texto**.
+7. En el preview, descarga en el formato deseado.
 
 ## Notas
 

@@ -44,7 +44,7 @@ async function getActiveTab() {
   return tab;
 }
 
-const CONTENT_SCRIPT_VERSION = 4;
+const CONTENT_SCRIPT_VERSION = 5;
 
 async function ensureContentScript(tabId) {
   let needsInject = true;
@@ -95,6 +95,53 @@ async function captureVisibleTabThrottled(windowId) {
 }
 
 async function startCapture(payload) {
+  const mode = payload?.mode === "text" ? "text" : "image";
+  if (mode === "text") {
+    return startTextCapture(payload);
+  }
+  return startImageCapture(payload);
+}
+
+async function saveCaptureResult(result) {
+  lastCaptureMemory = result;
+  try {
+    await chrome.storage.session.set({ [CAPTURE_STORE_KEY]: result });
+  } catch {
+    // Capturas muy grandes pueden superar la cuota de storage; la memoria del SW sigue sirviendo el preview.
+  }
+  await chrome.tabs.create({ url: chrome.runtime.getURL("preview/preview.html") });
+  return result;
+}
+
+async function startTextCapture(payload) {
+  const tab = await getActiveTab();
+  await ensureContentScript(tab.id);
+
+  const targetId = payload?.targetId ?? "document";
+  const extracted = await chrome.tabs.sendMessage(tab.id, {
+    type: "EXTRACT_TEXT",
+    targetId
+  });
+
+  if (!extracted?.ok) {
+    throw new Error(extracted?.error || "No se pudo extraer el texto.");
+  }
+
+  const result = {
+    kind: "text",
+    text: extracted.result.text,
+    markdown: extracted.result.markdown,
+    charCount: extracted.result.charCount,
+    lineCount: extracted.result.lineCount,
+    targetLabel: extracted.result.label,
+    pageTitle: tab.title || "captura",
+    capturedAt: Date.now()
+  };
+
+  return saveCaptureResult(result);
+}
+
+async function startImageCapture(payload) {
   const tab = await getActiveTab();
   await ensureContentScript(tab.id);
 
@@ -152,6 +199,7 @@ async function startCapture(payload) {
   const stitched = await stitchInTab(tab.id, slices, scale);
 
   const result = {
+    kind: "image",
     dataUrl: stitched.dataUrl,
     width: stitched.width,
     height: stitched.height,
@@ -161,15 +209,7 @@ async function startCapture(payload) {
     capturedAt: Date.now()
   };
 
-  lastCaptureMemory = result;
-  try {
-    await chrome.storage.session.set({ [CAPTURE_STORE_KEY]: result });
-  } catch {
-    // Capturas muy grandes pueden superar la cuota de storage; la memoria del SW sigue sirviendo el preview.
-  }
-
-  await chrome.tabs.create({ url: chrome.runtime.getURL("preview/preview.html") });
-  return result;
+  return saveCaptureResult(result);
 }
 
 async function stitchInTab(tabId, slices, scale) {

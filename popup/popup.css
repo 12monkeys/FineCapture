@@ -141,6 +141,48 @@ input[type="range"] {
   margin-top: -4px;
 }
 
+.modes {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.mode {
+  display: grid;
+  place-items: center;
+  gap: 4px;
+  padding: 10px 8px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--bg0);
+  cursor: pointer;
+  font-weight: 700;
+  font-size: 13px;
+}
+
+.mode:has(input:checked) {
+  border-color: rgba(0, 214, 163, 0.55);
+  background: rgba(0, 214, 163, 0.1);
+  color: var(--accent);
+}
+
+.mode input { accent-color: var(--accent); }
+
+.text-thumb {
+  margin: 0;
+  max-height: 140px;
+  overflow: auto;
+  padding: 10px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--bg0);
+  color: #cfe6db;
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .check {
   display: flex;
   gap: 10px;

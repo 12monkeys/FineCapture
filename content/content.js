@@ -1,5 +1,5 @@
 (() => {
-  const FC_VERSION = 4;
+  const FC_VERSION = 5;
   if (window.__FC__?.version === FC_VERSION) return;
   if (window.__FC__?.onMessage) {
     chrome.runtime.onMessage.removeListener(window.__FC__.onMessage);
@@ -46,6 +46,8 @@
       case "CLEANUP_CAPTURE":
         cleanupCapture();
         return { ok: true };
+      case "EXTRACT_TEXT":
+        return extractTextCapture(message.targetId);
       default:
         return { ok: false, error: "Mensaje desconocido." };
     }
@@ -593,5 +595,187 @@
       window.scrollTo(STATE.capture.pageScroll.x, STATE.capture.pageScroll.y);
     }
     STATE.capture = null;
+  }
+
+  function extractTextCapture(targetId) {
+    const target = resolveTarget(targetId || "document");
+    const root = target.kind === "document"
+      ? (document.body || document.documentElement)
+      : target.el;
+
+    if (!root) {
+      return { ok: false, error: "No se encontró el nodo para extraer texto." };
+    }
+
+    const markdown = extractStructuredText(root, { markdown: true });
+    const text = extractStructuredText(root, { markdown: false });
+    const label = target.kind === "document"
+      ? "Página completa (ventana)"
+      : describeElement(root, Number(String(targetId).replace("el-", "")) || 1);
+
+    if (!text.trim()) {
+      return { ok: false, error: "No hay texto visible en la zona seleccionada." };
+    }
+
+    return {
+      ok: true,
+      result: {
+        text,
+        markdown,
+        charCount: text.length,
+        lineCount: text.split(/\n/).length,
+        label
+      }
+    };
+  }
+
+  const TEXT_SKIP_TAGS = new Set([
+    "SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "SVG", "PATH", "CANVAS",
+    "IFRAME", "OBJECT", "EMBED", "VIDEO", "AUDIO", "SOURCE", "TRACK"
+  ]);
+
+  const TEXT_BLOCK_TAGS = new Set([
+    "DIV", "P", "SECTION", "ARTICLE", "MAIN", "ASIDE", "HEADER", "FOOTER",
+    "NAV", "UL", "OL", "DL", "LI", "BLOCKQUOTE", "FIGURE", "FIGCAPTION",
+    "TR", "TABLE", "THEAD", "TBODY", "TFOOT", "DD", "DT", "FORM", "FIELDSET"
+  ]);
+
+  function isVisibleForText(el) {
+    if (!(el instanceof Element)) return true;
+    if (isFineCaptureUi(el)) return false;
+    if (TEXT_SKIP_TAGS.has(el.tagName)) return false;
+    if (el.getAttribute("aria-hidden") === "true") return false;
+    if (el.hidden) return false;
+    const style = getComputedStyle(el);
+    if (style.display === "none" || style.visibility === "hidden") return false;
+    if (parseFloat(style.opacity || "1") === 0) return false;
+    return true;
+  }
+
+  function normalizeSpace(value) {
+    return String(value || "").replace(/\u00a0/g, " ").replace(/[ \t]+/g, " ").trim();
+  }
+
+  function collapseBlankLines(value) {
+    return String(value || "").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+  }
+
+  function leafText(el) {
+    return normalizeSpace(el.innerText || el.textContent || "");
+  }
+
+  function hasStructuralChildren(el) {
+    return [...el.children].some((child) => {
+      if (!isVisibleForText(child)) return false;
+      const tag = child.tagName;
+      if (/^H[1-6]$/.test(tag) || tag === "LI" || tag === "BR" || tag === "HR" || tag === "PRE") {
+        return true;
+      }
+      if (TEXT_BLOCK_TAGS.has(tag)) return true;
+      const role = child.getAttribute("role");
+      return role === "heading" || role === "listitem" || role === "article" || role === "row";
+    });
+  }
+
+  /**
+   * Walks only the selected DOM subtree and keeps titles / block structure
+   * (useful for chats, threads and article-like layouts).
+   */
+  function extractStructuredText(root, { markdown }) {
+    const lines = [];
+
+    const pushBlank = () => {
+      if (lines.length && lines[lines.length - 1] !== "") lines.push("");
+    };
+
+    const pushLine = (line) => {
+      const value = String(line || "").replace(/\s+$/g, "");
+      if (!value) return;
+      lines.push(value);
+    };
+
+    const walk = (node) => {
+      if (node.nodeType === Node.TEXT_NODE) {
+        const t = normalizeSpace(node.textContent);
+        if (t) pushLine(t);
+        return;
+      }
+      if (node.nodeType !== Node.ELEMENT_NODE) return;
+      const el = node;
+      if (!isVisibleForText(el)) return;
+
+      const tag = el.tagName;
+      const role = el.getAttribute("role") || "";
+
+      if (tag === "BR") {
+        pushBlank();
+        return;
+      }
+
+      if (tag === "HR") {
+        pushBlank();
+        pushLine(markdown ? "---" : "————————");
+        pushBlank();
+        return;
+      }
+
+      if (/^H[1-6]$/.test(tag) || role === "heading") {
+        const level = /^H[1-6]$/.test(tag)
+          ? Number(tag[1])
+          : Math.min(6, Math.max(1, Number(el.getAttribute("aria-level")) || 2));
+        const text = leafText(el);
+        if (text) {
+          pushBlank();
+          pushLine(markdown ? `${"#".repeat(level)} ${text}` : text);
+          pushBlank();
+        }
+        return;
+      }
+
+      if (tag === "LI" || role === "listitem") {
+        const text = leafText(el);
+        if (text) pushLine(markdown ? `- ${text}` : text);
+        return;
+      }
+
+      if (tag === "PRE") {
+        const text = String(el.textContent || "").replace(/\s+$/g, "");
+        if (text) {
+          pushBlank();
+          if (markdown) {
+            pushLine("```");
+            text.split("\n").forEach((line) => lines.push(line));
+            pushLine("```");
+          } else {
+            text.split("\n").forEach((line) => lines.push(line));
+          }
+          pushBlank();
+        }
+        return;
+      }
+
+      // Chat/message-like or simple block with only inline content → one text unit.
+      const structural = hasStructuralChildren(el);
+      if (!structural && (TEXT_BLOCK_TAGS.has(tag) || role === "article" || role === "row")) {
+        const text = leafText(el);
+        if (text) {
+          pushLine(text);
+          pushBlank();
+        }
+        return;
+      }
+
+      if (structural || TEXT_BLOCK_TAGS.has(tag) || role === "article" || role === "list" || role === "feed") {
+        for (const child of el.childNodes) walk(child);
+        pushBlank();
+        return;
+      }
+
+      // Inline wrappers: unwrap children without forcing new blocks.
+      for (const child of el.childNodes) walk(child);
+    };
+
+    walk(root);
+    return collapseBlankLines(lines.join("\n"));
   }
 })();
