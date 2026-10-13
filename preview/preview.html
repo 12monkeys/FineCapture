@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>FineCapture — Preview</title>
+  <link rel="stylesheet" href="preview.css" />
+</head>
+<body>
+  <div class="frame">
+    <aside class="controls">
+      <div class="brand">
+        <div class="mark" aria-hidden="true"></div>
+        <div>
+          <h1>FineCapture</h1>
+          <p id="meta">Sin captura</p>
+        </div>
+      </div>
+
+      <label class="block">
+        <span>Formato de descarga</span>
+        <div class="formats" role="radiogroup" aria-label="Formato">
+          <label><input type="radio" name="format" value="png" checked /> PNG</label>
+          <label><input type="radio" name="format" value="jpeg" /> JPG</label>
+          <label><input type="radio" name="format" value="webp" /> WebP</label>
+        </div>
+      </label>
+
+      <label class="block" id="qualityBlock">
+        <span>Calidad JPG/WebP <strong id="qualityLabel">0.92</strong></span>
+        <input type="range" id="quality" min="0.5" max="1" step="0.01" value="0.92" />
+      </label>
+
+      <label class="block">
+        <span>Escala de exportación <strong id="exportScaleLabel">100%</strong></span>
+        <p class="hint">Parte de la imagen capturada. 100% mantiene el tamaño actual; baja hasta 10% para aligerar el archivo.</p>
+        <input type="range" id="exportScale" min="10" max="100" step="5" value="100" />
+      </label>
+
+      <div class="stats">
+        <div><span>Origen</span><strong id="statSource">—</strong></div>
+        <div><span>Captura</span><strong id="statCapture">—</strong></div>
+        <div><span>Exportación</span><strong id="statExport">—</strong></div>
+      </div>
+
+      <button type="button" id="downloadBtn" class="primary" disabled>Descargar</button>
+      <button type="button" id="recaptureHint" class="ghost">Vuelve al popup de la extensión para una nueva captura</button>
+    </aside>
+
+    <main class="stage">
+      <div id="empty" class="empty">No hay captura en esta sesión. Abre FineCapture en una pestaña y pulsa Capturar.</div>
+      <div id="previewWrap" class="preview-wrap hidden">
+        <img id="previewImage" alt="Vista previa de la captura completa" />
+      </div>
+    </main>
+  </div>
+  <script type="module" src="preview.js"></script>
+</body>
+</html>

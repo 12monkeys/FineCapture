@@ -1,0 +1,215 @@
+@import url("https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,500;0,9..40,700;1,9..40,500&family=Syne:wght@700;800&display=swap");
+
+:root {
+  --bg0: #0b1116;
+  --bg1: #121a21;
+  --bg2: #1a2530;
+  --line: rgba(120, 180, 160, 0.18);
+  --text: #e7f2ec;
+  --muted: #8aa297;
+  --accent: #00d6a3;
+  --accent-2: #19b7d6;
+  --danger: #ff6b6b;
+  --radius: 14px;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  width: 360px;
+  color: var(--text);
+  font-family: "DM Sans", sans-serif;
+  background:
+    radial-gradient(120% 80% at 0% 0%, rgba(0, 214, 163, 0.16), transparent 55%),
+    radial-gradient(90% 60% at 100% 0%, rgba(25, 183, 214, 0.12), transparent 50%),
+    linear-gradient(180deg, #0d141a, #0a1015 70%);
+}
+
+body {
+  min-height: 480px;
+}
+
+.shell {
+  padding: 16px;
+  display: grid;
+  gap: 12px;
+}
+
+.brand {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.brand-mark {
+  width: 42px;
+  height: 42px;
+  border-radius: 12px;
+  background:
+    linear-gradient(145deg, rgba(0, 214, 163, 0.95), rgba(25, 183, 214, 0.7)),
+    repeating-linear-gradient(90deg, transparent 0 6px, rgba(0,0,0,0.08) 6px 7px);
+  box-shadow: 0 8px 24px rgba(0, 214, 163, 0.22);
+  position: relative;
+}
+
+.brand-mark::after {
+  content: "";
+  position: absolute;
+  inset: 10px 8px 8px;
+  border: 2px solid rgba(6, 20, 26, 0.55);
+  border-radius: 6px;
+  border-top-width: 7px;
+}
+
+h1 {
+  margin: 0;
+  font-family: "Syne", sans-serif;
+  font-size: 22px;
+  letter-spacing: -0.03em;
+}
+
+.brand p, .hint {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.panel {
+  background: linear-gradient(180deg, rgba(26, 37, 48, 0.92), rgba(18, 26, 33, 0.92));
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 12px;
+  display: grid;
+  gap: 10px;
+}
+
+.section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+h2 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #b9d2c6;
+}
+
+.pill {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: rgba(0, 214, 163, 0.12);
+  color: var(--accent);
+  border: 1px solid rgba(0, 214, 163, 0.25);
+}
+
+.field {
+  display: grid;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+select {
+  width: 100%;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--bg0);
+  color: var(--text);
+  padding: 10px 12px;
+  font: inherit;
+}
+
+input[type="range"] {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+.scale-ends {
+  display: flex;
+  justify-content: space-between;
+  color: var(--muted);
+  font-size: 11px;
+  margin-top: -4px;
+}
+
+button {
+  border: 0;
+  cursor: pointer;
+  font: inherit;
+  border-radius: 10px;
+  padding: 10px 12px;
+  transition: transform 0.15s ease, opacity 0.15s ease, background 0.15s ease;
+}
+
+button:hover { transform: translateY(-1px); }
+button:active { transform: translateY(0); }
+button:disabled { opacity: 0.55; cursor: not-allowed; transform: none; }
+
+.primary {
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  color: #041018;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+}
+
+.secondary, .ghost {
+  background: var(--bg2);
+  color: var(--text);
+  border: 1px solid var(--line);
+}
+
+.ghost {
+  padding: 4px 8px;
+  font-size: 11px;
+}
+
+.status {
+  min-height: 18px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.status.error { color: var(--danger); }
+.status.ok { color: var(--accent); }
+
+.progress-wrap {
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.06);
+  overflow: hidden;
+}
+
+.progress-bar {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  transition: width 0.2s ease;
+}
+
+.hidden { display: none !important; }
+
+.preview img {
+  width: 100%;
+  max-height: 160px;
+  object-fit: contain;
+  object-position: top;
+  border-radius: 10px;
+  background:
+    linear-gradient(45deg, #1a222a 25%, transparent 25%),
+    linear-gradient(-45deg, #1a222a 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #1a222a 75%),
+    linear-gradient(-45deg, transparent 75%, #1a222a 75%);
+  background-size: 16px 16px;
+  background-position: 0 0, 0 8px, 8px -8px, -8px 0;
+  background-color: #10161c;
+  border: 1px solid var(--line);
+}

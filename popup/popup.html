@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>FineCapture</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <div class="shell">
+    <header class="brand">
+      <div class="brand-mark" aria-hidden="true"></div>
+      <div>
+        <h1>FineCapture</h1>
+        <p>Captura completa con scroll inteligente</p>
+      </div>
+    </header>
+
+    <section class="panel">
+      <div class="section-head">
+        <h2>Zona a capturar</h2>
+        <button type="button" id="refreshTargets" class="ghost">Actualizar</button>
+      </div>
+      <label class="field">
+        <span>Contenedor con scroll</span>
+        <select id="targetSelect"></select>
+      </label>
+      <button type="button" id="pickOnPage" class="secondary">Elegir en la página</button>
+    </section>
+
+    <section class="panel">
+      <div class="section-head">
+        <h2>Escala de salida</h2>
+        <span id="scaleValue" class="pill">100%</span>
+      </div>
+      <p class="hint">100% = 1:1 (máxima fidelidad). Reduce si la página es muy alta.</p>
+      <input type="range" id="scaleRange" min="10" max="100" step="5" value="100" />
+      <div class="scale-ends"><span>10%</span><span>100%</span></div>
+    </section>
+
+    <section class="panel actions">
+      <button type="button" id="captureBtn" class="primary">Capturar</button>
+      <div id="status" class="status" role="status"></div>
+      <div id="progressWrap" class="progress-wrap hidden">
+        <div id="progressBar" class="progress-bar"></div>
+      </div>
+    </section>
+
+    <section id="miniPreview" class="panel preview hidden">
+      <div class="section-head">
+        <h2>Última captura</h2>
+        <span id="dims" class="pill"></span>
+      </div>
+      <img id="thumb" alt="Vista previa de la captura" />
+      <button type="button" id="openPreview" class="secondary">Abrir preview y descargar</button>
+    </section>
+  </div>
+  <script type="module" src="popup.js"></script>
+</body>
+</html>
