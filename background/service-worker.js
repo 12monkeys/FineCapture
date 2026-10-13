@@ -44,7 +44,7 @@ async function getActiveTab() {
   return tab;
 }
 
-const CONTENT_SCRIPT_VERSION = 7;
+const CONTENT_SCRIPT_VERSION = 8;
 
 async function ensureContentScript(tabId) {
   let needsInject = true;
@@ -167,8 +167,10 @@ async function captureSliderStrips(tab, targetId, scale) {
 
   for (const slider of found.sliders) {
     const slideSlices = [];
+    let previousActive = -1;
+
     for (let i = 0; i < slider.slideCount; i += 1) {
-      const positioned = await chrome.tabs.sendMessage(tab.id, {
+      let positioned = await chrome.tabs.sendMessage(tab.id, {
         type: "SLIDER_GO_TO",
         sliderId: slider.id,
         index: i
@@ -177,7 +179,30 @@ async function captureSliderStrips(tab, targetId, scale) {
         throw new Error(positioned?.error || `No se pudo mostrar el slide ${i + 1}.`);
       }
 
-      await wait(PAINT_SETTLE_MS);
+      // Keen/Tinder often needs a second attempt (lazy slides + tap zones).
+      if (
+        !positioned.moved ||
+        positioned.activeIndex === previousActive ||
+        positioned.hasVisual === false
+      ) {
+        await wait(350);
+        positioned = await chrome.tabs.sendMessage(tab.id, {
+          type: "SLIDER_GO_TO",
+          sliderId: slider.id,
+          index: i
+        });
+        if (!positioned?.ok) {
+          throw new Error(positioned?.error || `No se pudo mostrar el slide ${i + 1}.`);
+        }
+      }
+
+      if (i > 0 && positioned.activeIndex === previousActive) {
+        throw new Error(
+          `El slider no cambió de foto (sigue en el slide ${previousActive + 1}). Prueba hacer clic manualmente en la foto y vuelve a capturar.`
+        );
+      }
+
+      await wait(Math.max(PAINT_SETTLE_MS, 280));
       const dataUrl = await captureVisibleTabThrottled(tab.windowId);
       slideSlices.push({
         dataUrl,
@@ -185,6 +210,7 @@ async function captureSliderStrips(tab, targetId, scale) {
         overlap: 0,
         isLast: i === slider.slideCount - 1
       });
+      previousActive = positioned.activeIndex ?? i;
 
       await emitProgress(i + 1, slider.slideCount, "slider");
     }

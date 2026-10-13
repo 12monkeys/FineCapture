@@ -1,5 +1,5 @@
 (() => {
-  const FC_VERSION = 7;
+  const FC_VERSION = 8;
   if (window.__FC__?.version === FC_VERSION) return;
   if (window.__FC__?.onMessage) {
     chrome.runtime.onMessage.removeListener(window.__FC__.onMessage);
@@ -633,7 +633,7 @@
 
   function findSlides(root) {
     const specific = root.querySelectorAll(
-      ".swiper-slide, .slick-slide, .splide__slide, .glider-slide, .keen-slider__slide, [aria-roledescription='slide'], [class*='carousel-item' i], [class*='slider__slide' i], [class*='slide-' i]"
+      ".keen-slider__slide, .swiper-slide, .slick-slide, .splide__slide, .glider-slide, [aria-roledescription='slide'], [id^='carousel-item-'], [class*='carousel-item' i], [class*='slider__slide' i]"
     );
     if (specific.length >= 2) {
       return [...specific].filter((el) => isSlideCandidate(el));
@@ -657,22 +657,58 @@
     return kids.length >= 2 ? kids : [];
   }
 
+  function parseDeclaredSlideCount(slides) {
+    for (const slide of slides) {
+      const label = slide.getAttribute("aria-label") || "";
+      const match = label.match(/(\d+)\s*(?:of|de)\s*(\d+)/i);
+      if (match) return Number(match[2]);
+    }
+    return slides.length;
+  }
+
   function findNextControl(root) {
+    const scope = root.parentElement || root;
     return (
       root.querySelector(
         ".swiper-button-next, .slick-next, .splide__arrow--next, .owl-next, .glider-next, [aria-label*='next' i], [aria-label*='siguiente' i], button[class*='next' i], [data-action='next']"
-      ) || null
+      ) ||
+      scope.querySelector(
+        ".swiper-button-next, .slick-next, .splide__arrow--next, .owl-next, .glider-next, [aria-label*='next' i], [aria-label*='siguiente' i], button[class*='next' i], [data-action='next']"
+      ) ||
+      null
+    );
+  }
+
+  function findPrevControl(root) {
+    const scope = root.parentElement || root;
+    return (
+      root.querySelector(
+        ".swiper-button-prev, .slick-prev, .splide__arrow--prev, .owl-prev, .glider-prev, [aria-label*='prev' i], [aria-label*='anterior' i], button[class*='prev' i], [data-action='prev']"
+      ) ||
+      scope.querySelector(
+        ".swiper-button-prev, .slick-prev, .splide__arrow--prev, .owl-prev, .glider-prev, [aria-label*='prev' i], [aria-label*='anterior' i], button[class*='prev' i], [data-action='prev']"
+      ) ||
+      null
     );
   }
 
   function findDots(root, slideCount) {
+    const scope = root.parentElement || root;
     const dots = [
       ...root.querySelectorAll(
         ".swiper-pagination-bullet, .slick-dots button, .slick-dots li, .splide__pagination__page, .owl-dot, [aria-label*='slide' i][role='button'], [aria-label*='Go to slide' i]"
+      ),
+      ...scope.querySelectorAll(
+        "[role='tab'], [class*='bullet' i], [class*='indicator' i], [class*='pageIndicator' i]"
       )
     ].filter((el) => el instanceof HTMLElement);
     if (dots.length >= 2) return dots.slice(0, Math.max(slideCount, dots.length));
     return dots;
+  }
+
+  function isKeenLike(el) {
+    const cls = String(el.className || "").toLowerCase();
+    return cls.includes("keen-slider") || cls.includes("profilecard__slider") || Boolean(el.querySelector(":scope > .keen-slider__slide"));
   }
 
   function looksLikeSlider(el) {
@@ -680,8 +716,9 @@
     const cls = `${el.className || ""} ${el.getAttribute("aria-roledescription") || ""}`.toLowerCase();
     const roleDesc = (el.getAttribute("aria-roledescription") || "").toLowerCase();
     if (roleDesc === "carousel" || roleDesc === "slider") return true;
-    if (/(swiper|slick|splide|embla|glider|carousel|keen-slider|owl-carousel)/.test(cls)) return true;
+    if (/(swiper|slick|splide|embla|glider|carousel|keen-slider|owl-carousel|profilecard__slider)/.test(cls)) return true;
     if (el.getAttribute("data-carousel") != null || el.getAttribute("data-slider") != null) return true;
+    if (isKeenLike(el)) return true;
 
     const style = getComputedStyle(el);
     const ox = style.overflowX;
@@ -698,10 +735,94 @@
     let score = slides.length * 10;
     if (rect.width >= 180 && rect.height >= 80) score += 20;
     if (el.swiper) score += 40;
+    if (isKeenLike(el)) score += 50;
     if (findNextControl(el) || findDots(el, slides.length).length >= 2) score += 25;
     const cls = String(el.className || "").toLowerCase();
-    if (/(swiper|slick|splide|carousel)/.test(cls)) score += 30;
+    if (/(swiper|slick|splide|carousel|keen-slider|profilecard__slider)/.test(cls)) score += 30;
     return score;
+  }
+
+  function findSliderApi(el) {
+    if (!el) return null;
+    if (el.swiper && typeof el.swiper.slideTo === "function") {
+      return { type: "swiper", api: el.swiper };
+    }
+    const seen = new Set();
+    const inspect = (obj) => {
+      if (!obj || typeof obj !== "object" || seen.has(obj)) return null;
+      seen.add(obj);
+      if (typeof obj.moveToIdx === "function") return { type: "keen", api: obj };
+      if (typeof obj.moveTo === "function" && obj.track) return { type: "keen", api: obj };
+      return null;
+    };
+
+    const direct = inspect(el);
+    if (direct) return direct;
+
+    for (const key of Object.keys(el)) {
+      try {
+        const found = inspect(el[key]);
+        if (found) return found;
+      } catch {
+        /* ignore */
+      }
+    }
+
+    // React fiber props sometimes hold the instance.
+    for (const key of Object.keys(el)) {
+      if (!key.startsWith("__reactFiber") && !key.startsWith("__reactInternalInstance") && !key.startsWith("__reactProps")) {
+        continue;
+      }
+      try {
+        const fiber = el[key];
+        const memo = fiber?.memoizedProps || fiber?.pendingProps;
+        const found = inspect(memo?.slider) || inspect(memo?.instance) || inspect(memo?.keenSlider);
+        if (found) return found;
+      } catch {
+        /* ignore */
+      }
+    }
+    return null;
+  }
+
+  function slideHasVisual(slide) {
+    if (!slide) return false;
+    if (slide.querySelector("img[src], video[src], canvas")) return true;
+    const nodes = [slide, ...slide.querySelectorAll("*")];
+    for (const node of nodes) {
+      if (!(node instanceof Element)) continue;
+      const bg = getComputedStyle(node).backgroundImage;
+      if (bg && bg !== "none" && /url\(/i.test(bg)) return true;
+    }
+    return false;
+  }
+
+  async function waitForSlideContent(slide, timeoutMs = 1800) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      if (slideHasVisual(slide)) return true;
+      await new Promise((r) => setTimeout(r, 120));
+    }
+    return slideHasVisual(slide);
+  }
+
+  function dispatchPointClick(el, clientX, clientY) {
+    const target = document.elementFromPoint(clientX, clientY) || el;
+    const base = { bubbles: true, cancelable: true, clientX, clientY, view: window };
+    target.dispatchEvent(new PointerEvent("pointerdown", { ...base, pointerId: 1, pointerType: "mouse", buttons: 1 }));
+    target.dispatchEvent(new MouseEvent("mousedown", { ...base, buttons: 1 }));
+    target.dispatchEvent(new PointerEvent("pointerup", { ...base, pointerId: 1, pointerType: "mouse", buttons: 0 }));
+    target.dispatchEvent(new MouseEvent("mouseup", { ...base, buttons: 0 }));
+    target.dispatchEvent(new MouseEvent("click", base));
+  }
+
+  function clickSliderSide(el, direction) {
+    const rect = el.getBoundingClientRect();
+    const x = direction === "next"
+      ? rect.left + rect.width * 0.88
+      : rect.left + rect.width * 0.12;
+    const y = rect.top + rect.height * 0.45;
+    dispatchPointClick(el, x, y);
   }
 
   function findSlidersInTarget(targetId) {
@@ -712,6 +833,9 @@
     const selectors = [
       '[aria-roledescription="carousel"]',
       '[aria-roledescription="slider"]',
+      ".keen-slider",
+      ".profileCard__slider",
+      "[class*='profileCard__slider']",
       ".swiper",
       ".swiper-container",
       ".slick-slider",
@@ -719,7 +843,6 @@
       ".embla",
       ".glider",
       ".owl-carousel",
-      ".keen-slider",
       ".carousel",
       '[class*="carousel" i]',
       '[class*="slider" i]'
@@ -763,20 +886,27 @@
     const selected = ranked.slice(0, MAX_SLIDERS);
     const sliders = selected.map((item, index) => {
       const id = `slider-${index + 1}`;
-      const slideCount = Math.min(MAX_SLIDES, item.slides.length);
+      const declared = parseDeclaredSlideCount(item.slides);
+      const slideCount = Math.min(MAX_SLIDES, Math.max(item.slides.length, declared));
+      // Keep enough slide nodes; if aria says 7 but only 7 nodes exist, fine.
+      const slides = item.slides.slice(0, slideCount);
       SLIDER_STATE.byId.set(id, {
         id,
         el: item.el,
-        slides: item.slides.slice(0, slideCount),
-        originalIndex: detectActiveSlideIndex(item.el, item.slides),
+        slides,
+        originalIndex: detectActiveSlideIndex(item.el, slides),
         next: findNextControl(item.el),
-        dots: findDots(item.el, slideCount)
+        prev: findPrevControl(item.el),
+        dots: findDots(item.el, slideCount),
+        keenLike: isKeenLike(item.el),
+        api: findSliderApi(item.el)
       });
       return {
         id,
         label: `Slider ${index + 1} (${slideCount} slides)`,
         slideCount,
-        selectorHint: shortSelector(item.el)
+        selectorHint: shortSelector(item.el),
+        engine: isKeenLike(item.el) ? "keen" : "generic"
       };
     });
 
@@ -784,14 +914,74 @@
   }
 
   function detectActiveSlideIndex(root, slides) {
+    const byAria = slides.findIndex((el) => el.getAttribute("aria-hidden") === "false");
+    if (byAria >= 0) return byAria;
+
     const active = slides.findIndex((el) =>
       el.classList.contains("swiper-slide-active") ||
       el.classList.contains("slick-active") ||
       el.classList.contains("is-active") ||
-      el.getAttribute("aria-current") === "true" ||
-      el.getAttribute("aria-hidden") === "false"
+      el.classList.contains("keen-slider__slide--active") ||
+      el.getAttribute("aria-current") === "true"
     );
-    return active >= 0 ? active : 0;
+    if (active >= 0) return active;
+
+    // Fallback: slide whose center is closest to the viewport/slider center.
+    const rootRect = root.getBoundingClientRect();
+    const centerX = rootRect.left + rootRect.width / 2;
+    let best = 0;
+    let bestDist = Infinity;
+    slides.forEach((el, idx) => {
+      const rect = el.getBoundingClientRect();
+      const dist = Math.abs(rect.left + rect.width / 2 - centerX);
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = idx;
+      }
+    });
+    return best;
+  }
+
+  async function stepSliderToward(slider, targetIndex) {
+    const root = slider.el;
+    let current = detectActiveSlideIndex(root, slider.slides);
+    if (current === targetIndex) return true;
+
+    const apiInfo = slider.api || findSliderApi(root);
+    if (apiInfo?.type === "swiper") {
+      apiInfo.api.slideTo(targetIndex, 0);
+      await new Promise((r) => setTimeout(r, 200));
+      return detectActiveSlideIndex(root, slider.slides) === targetIndex;
+    }
+    if (apiInfo?.type === "keen" && typeof apiInfo.api.moveToIdx === "function") {
+      apiInfo.api.moveToIdx(targetIndex, true);
+      await new Promise((r) => setTimeout(r, 260));
+      return detectActiveSlideIndex(root, slider.slides) === targetIndex;
+    }
+
+    if (slider.dots[targetIndex]) {
+      slider.dots[targetIndex].click();
+      await new Promise((r) => setTimeout(r, 260));
+      if (detectActiveSlideIndex(root, slider.slides) === targetIndex) return true;
+    }
+
+    // Keen / Tinder profile cards: tap right/left side of the photo.
+    const maxSteps = slider.slides.length + 4;
+    for (let step = 0; step < maxSteps; step += 1) {
+      current = detectActiveSlideIndex(root, slider.slides);
+      if (current === targetIndex) return true;
+
+      if (current < targetIndex) {
+        if (slider.next) slider.next.click();
+        else clickSliderSide(root, "next");
+      } else {
+        if (slider.prev) slider.prev.click();
+        else clickSliderSide(root, "prev");
+      }
+      await new Promise((r) => setTimeout(r, 280));
+    }
+
+    return detectActiveSlideIndex(root, slider.slides) === targetIndex;
   }
 
   async function goToSliderSlide(sliderId, index) {
@@ -800,40 +990,26 @@
 
     const i = Math.max(0, Math.min(slider.slides.length - 1, Number(index) || 0));
     slider.el.scrollIntoView({ block: "center", inline: "nearest" });
+    await new Promise((r) => setTimeout(r, 80));
 
-    const root = slider.el;
-    let moved = false;
-
-    if (root.swiper && typeof root.swiper.slideTo === "function") {
-      root.swiper.slideTo(i, 0);
-      moved = true;
-    } else if (slider.dots[i]) {
-      slider.dots[i].click();
-      moved = true;
-    } else if (slider.slides[i]) {
-      const slide = slider.slides[i];
-      const track =
-        root.querySelector(".swiper-wrapper, .slick-track, .splide__list, .embla__container, .glider-track") || root;
-      if (track && track.scrollWidth > track.clientWidth) {
-        track.scrollLeft = slide.offsetLeft;
-        moved = true;
-      } else {
-        slide.scrollIntoView({ inline: "center", block: "nearest", behavior: "auto" });
-        moved = true;
-      }
+    const moved = await stepSliderToward(slider, i);
+    const slide = slider.slides[i];
+    if (slide) {
+      await waitForSlideContent(slide, moved ? 2000 : 900);
     }
 
-    if (!moved && slider.next && i > 0) {
-      // Fallback: walk with next from start
-      for (let n = 0; n < i; n += 1) slider.next.click();
+    // Re-check after lazy paint; one more nudge if still wrong.
+    if (detectActiveSlideIndex(slider.el, slider.slides) !== i) {
+      await stepSliderToward(slider, i);
+      if (slide) await waitForSlideContent(slide, 1200);
     }
 
-    // Allow animation / lazy media
-    await new Promise((r) => setTimeout(r, 220));
-
-    const rect = root.getBoundingClientRect();
+    const activeIndex = detectActiveSlideIndex(slider.el, slider.slides);
+    const rect = slider.el.getBoundingClientRect();
     return {
       ok: true,
+      moved: activeIndex === i,
+      activeIndex,
       crop: {
         x: Math.max(0, rect.left),
         y: Math.max(0, rect.top),
@@ -842,7 +1018,8 @@
         viewportWidth: window.innerWidth,
         viewportHeight: window.innerHeight
       },
-      index: i
+      index: i,
+      hasVisual: slide ? slideHasVisual(slide) : false
     };
   }
 

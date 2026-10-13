@@ -33,4 +33,4 @@ Extensión de Chrome (Manifest V3) para capturar páginas o regiones con scroll 
 - No captura páginas internas del navegador (`chrome://`, `edge://`, Web Store, etc.).
 - Páginas muy altas pueden verse limitadas por el tamaño máximo de canvas del navegador (~16384 px). Usa una escala menor si ocurre.
 - Opción **Ocultar overlays flotantes** (activada por defecto): esconde `fixed`/`sticky` y también `absolute` anclados al borde (p. ej. barras inferiores tipo `Pos(a) B(0)`), detectando además elementos que no se mueven al hacer scroll.
-- Opción **Expandir sliders / carruseles**: detecta carruseles (Swiper, Slick, etc.), captura cada slide, los apila en vertical y sustituye esa zona en la captura completa de la página.
+- Opción **Expandir sliders / carruseles**: detecta carruseles (Keen Slider / Tinder, Swiper, Slick, etc.), avanza slide a slide (API o toque izq/der), espera fotos lazy, los apila en vertical y sustituye esa zona en la captura completa.
