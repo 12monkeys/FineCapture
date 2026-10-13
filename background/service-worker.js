@@ -1,5 +1,11 @@
 const CAPTURE_STORE_KEY = "fineCaptureLast";
+/** Chrome enforces MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND (typically 2/s). */
+const MIN_CAPTURE_INTERVAL_MS = 600;
+const PAINT_SETTLE_MS = 180;
+const CAPTURE_MAX_RETRIES = 4;
+
 let lastCaptureMemory = null;
+let lastCaptureVisibleAt = 0;
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "START_CAPTURE") {
@@ -52,6 +58,34 @@ function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function isCaptureQuotaError(error) {
+  const text = String(error?.message || error || "");
+  return /MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND|quota/i.test(text);
+}
+
+async function captureVisibleTabThrottled(windowId) {
+  let attempt = 0;
+  while (true) {
+    const elapsed = Date.now() - lastCaptureVisibleAt;
+    if (elapsed < MIN_CAPTURE_INTERVAL_MS) {
+      await wait(MIN_CAPTURE_INTERVAL_MS - elapsed);
+    }
+
+    try {
+      const dataUrl = await chrome.tabs.captureVisibleTab(windowId, { format: "png" });
+      lastCaptureVisibleAt = Date.now();
+      return dataUrl;
+    } catch (error) {
+      attempt += 1;
+      if (!isCaptureQuotaError(error) || attempt > CAPTURE_MAX_RETRIES) {
+        throw error;
+      }
+      // Back off harder if Chrome still rate-limits us.
+      await wait(MIN_CAPTURE_INTERVAL_MS * (attempt + 1));
+    }
+  }
+}
+
 async function startCapture(payload) {
   const tab = await getActiveTab();
   await ensureContentScript(tab.id);
@@ -85,11 +119,8 @@ async function startCapture(payload) {
         throw new Error(positioned?.error || `Error al hacer scroll en el paso ${i + 1}.`);
       }
 
-      await wait(120);
-
-      const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, {
-        format: "png"
-      });
+      await wait(PAINT_SETTLE_MS);
+      const dataUrl = await captureVisibleTabThrottled(tab.windowId);
 
       slices.push({
         dataUrl,
