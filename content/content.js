@@ -1,5 +1,5 @@
 (() => {
-  const FC_VERSION = 5;
+  const FC_VERSION = 6;
   if (window.__FC__?.version === FC_VERSION) return;
   if (window.__FC__?.onMessage) {
     chrome.runtime.onMessage.removeListener(window.__FC__.onMessage);
@@ -48,6 +48,14 @@
         return { ok: true };
       case "EXTRACT_TEXT":
         return extractTextCapture(message.targetId);
+      case "FIND_SLIDERS":
+        return findSlidersInTarget(message.targetId);
+      case "SLIDER_GO_TO":
+        return goToSliderSlide(message.sliderId, message.index);
+      case "SLIDER_RESTORE":
+        return restoreSlider(message.sliderId);
+      case "SLIDER_GEOMETRY":
+        return getSliderGeometry(message.sliderId, message.targetId);
       default:
         return { ok: false, error: "Mensaje desconocido." };
     }
@@ -595,6 +603,279 @@
       window.scrollTo(STATE.capture.pageScroll.x, STATE.capture.pageScroll.y);
     }
     STATE.capture = null;
+  }
+
+  const SLIDER_STATE = {
+    byId: new Map()
+  };
+
+  const MAX_SLIDERS = 2;
+  const MAX_SLIDES = 16;
+
+  function getCaptureRoot(targetId) {
+    const target = resolveTarget(targetId || "document");
+    if (target.kind === "document") {
+      return { kind: "document", el: null, root: document.body || document.documentElement };
+    }
+    return { kind: "element", el: target.el, root: target.el };
+  }
+
+  function isSlideCandidate(el) {
+    if (!(el instanceof HTMLElement) || isFineCaptureUi(el)) return false;
+    if (el.tagName === "SCRIPT" || el.tagName === "STYLE" || el.tagName === "NOSCRIPT") return false;
+    const style = getComputedStyle(el);
+    // Keep aria-hidden / off-canvas slides: carousels hide inactive ones on purpose.
+    if (style.display === "none") return false;
+    return el.offsetWidth >= 8 || el.offsetHeight >= 8 || el.getBoundingClientRect().width >= 8;
+  }
+
+  function findSlides(root) {
+    const specific = root.querySelectorAll(
+      ".swiper-slide, .slick-slide, .splide__slide, .glider-slide, .keen-slider__slide, [aria-roledescription='slide'], [class*='carousel-item' i], [class*='slider__slide' i], [class*='slide-' i]"
+    );
+    if (specific.length >= 2) {
+      return [...specific].filter((el) => isSlideCandidate(el));
+    }
+
+    const track =
+      root.querySelector(".swiper-wrapper, .slick-track, .splide__list, .embla__container, .glider-track, .owl-stage") ||
+      root;
+    const kids = [...track.children].filter((el) => isSlideCandidate(el));
+    if (kids.length >= 2) {
+      const widths = kids.map((el) => el.getBoundingClientRect().width).filter((w) => w > 20);
+      if (widths.length >= 2) {
+        const avg = widths.reduce((a, b) => a + b, 0) / widths.length;
+        const similar = kids.filter((el) => {
+          const w = el.getBoundingClientRect().width;
+          return w > avg * 0.55 && w < avg * 1.45;
+        });
+        if (similar.length >= 2) return similar;
+      }
+    }
+    return kids.length >= 2 ? kids : [];
+  }
+
+  function findNextControl(root) {
+    return (
+      root.querySelector(
+        ".swiper-button-next, .slick-next, .splide__arrow--next, .owl-next, .glider-next, [aria-label*='next' i], [aria-label*='siguiente' i], button[class*='next' i], [data-action='next']"
+      ) || null
+    );
+  }
+
+  function findDots(root, slideCount) {
+    const dots = [
+      ...root.querySelectorAll(
+        ".swiper-pagination-bullet, .slick-dots button, .slick-dots li, .splide__pagination__page, .owl-dot, [aria-label*='slide' i][role='button'], [aria-label*='Go to slide' i]"
+      )
+    ].filter((el) => el instanceof HTMLElement);
+    if (dots.length >= 2) return dots.slice(0, Math.max(slideCount, dots.length));
+    return dots;
+  }
+
+  function looksLikeSlider(el) {
+    if (!(el instanceof HTMLElement) || isFineCaptureUi(el)) return false;
+    const cls = `${el.className || ""} ${el.getAttribute("aria-roledescription") || ""}`.toLowerCase();
+    const roleDesc = (el.getAttribute("aria-roledescription") || "").toLowerCase();
+    if (roleDesc === "carousel" || roleDesc === "slider") return true;
+    if (/(swiper|slick|splide|embla|glider|carousel|keen-slider|owl-carousel)/.test(cls)) return true;
+    if (el.getAttribute("data-carousel") != null || el.getAttribute("data-slider") != null) return true;
+
+    const style = getComputedStyle(el);
+    const ox = style.overflowX;
+    const horizontal =
+      /(auto|scroll|overlay)/.test(ox) &&
+      el.scrollWidth > el.clientWidth + 40 &&
+      el.scrollHeight <= el.clientHeight * 1.25;
+    if (horizontal && findSlides(el).length >= 2) return true;
+    return false;
+  }
+
+  function scoreSlider(el, slides) {
+    const rect = el.getBoundingClientRect();
+    let score = slides.length * 10;
+    if (rect.width >= 180 && rect.height >= 80) score += 20;
+    if (el.swiper) score += 40;
+    if (findNextControl(el) || findDots(el, slides.length).length >= 2) score += 25;
+    const cls = String(el.className || "").toLowerCase();
+    if (/(swiper|slick|splide|carousel)/.test(cls)) score += 30;
+    return score;
+  }
+
+  function findSlidersInTarget(targetId) {
+    SLIDER_STATE.byId.clear();
+    const { root } = getCaptureRoot(targetId);
+    if (!root) return { ok: false, error: "Sin raíz de captura." };
+
+    const selectors = [
+      '[aria-roledescription="carousel"]',
+      '[aria-roledescription="slider"]',
+      ".swiper",
+      ".swiper-container",
+      ".slick-slider",
+      ".splide",
+      ".embla",
+      ".glider",
+      ".owl-carousel",
+      ".keen-slider",
+      ".carousel",
+      '[class*="carousel" i]',
+      '[class*="slider" i]'
+    ];
+
+    const candidates = new Set();
+    for (const sel of selectors) {
+      try {
+        root.querySelectorAll(sel).forEach((el) => candidates.add(el));
+      } catch {
+        /* invalid selector on some engines for i flag — ignore */
+      }
+    }
+
+    // Also scan for horizontal scroll tracks inside root.
+    root.querySelectorAll("*").forEach((el) => {
+      if (looksLikeSlider(el)) candidates.add(el);
+    });
+
+    const ranked = [];
+    for (const el of candidates) {
+      if (!(el instanceof HTMLElement) || !looksLikeSlider(el)) continue;
+      // Prefer outermost carousel wrappers, skip nested slides.
+      if (el.closest && [...candidates].some((other) => other !== el && other.contains(el) && looksLikeSlider(other))) {
+        // keep inner only if outer has fewer slides — skip nested for now
+        const parentSlider = [...candidates].find((other) => other !== el && other.contains(el) && looksLikeSlider(other));
+        if (parentSlider) continue;
+      }
+      const slides = findSlides(el);
+      if (slides.length < 2) continue;
+      const rect = el.getBoundingClientRect();
+      if (rect.width < 120 || rect.height < 60) continue;
+      ranked.push({
+        el,
+        slides,
+        score: scoreSlider(el, slides)
+      });
+    }
+
+    ranked.sort((a, b) => b.score - a.score);
+    const selected = ranked.slice(0, MAX_SLIDERS);
+    const sliders = selected.map((item, index) => {
+      const id = `slider-${index + 1}`;
+      const slideCount = Math.min(MAX_SLIDES, item.slides.length);
+      SLIDER_STATE.byId.set(id, {
+        id,
+        el: item.el,
+        slides: item.slides.slice(0, slideCount),
+        originalIndex: detectActiveSlideIndex(item.el, item.slides),
+        next: findNextControl(item.el),
+        dots: findDots(item.el, slideCount)
+      });
+      return {
+        id,
+        label: `Slider ${index + 1} (${slideCount} slides)`,
+        slideCount,
+        selectorHint: shortSelector(item.el)
+      };
+    });
+
+    return { ok: true, sliders };
+  }
+
+  function detectActiveSlideIndex(root, slides) {
+    const active = slides.findIndex((el) =>
+      el.classList.contains("swiper-slide-active") ||
+      el.classList.contains("slick-active") ||
+      el.classList.contains("is-active") ||
+      el.getAttribute("aria-current") === "true" ||
+      el.getAttribute("aria-hidden") === "false"
+    );
+    return active >= 0 ? active : 0;
+  }
+
+  async function goToSliderSlide(sliderId, index) {
+    const slider = SLIDER_STATE.byId.get(sliderId);
+    if (!slider) return { ok: false, error: "Slider no encontrado. Vuelve a detectar." };
+
+    const i = Math.max(0, Math.min(slider.slides.length - 1, Number(index) || 0));
+    slider.el.scrollIntoView({ block: "center", inline: "nearest" });
+
+    const root = slider.el;
+    let moved = false;
+
+    if (root.swiper && typeof root.swiper.slideTo === "function") {
+      root.swiper.slideTo(i, 0);
+      moved = true;
+    } else if (slider.dots[i]) {
+      slider.dots[i].click();
+      moved = true;
+    } else if (slider.slides[i]) {
+      const slide = slider.slides[i];
+      const track =
+        root.querySelector(".swiper-wrapper, .slick-track, .splide__list, .embla__container, .glider-track") || root;
+      if (track && track.scrollWidth > track.clientWidth) {
+        track.scrollLeft = slide.offsetLeft;
+        moved = true;
+      } else {
+        slide.scrollIntoView({ inline: "center", block: "nearest", behavior: "auto" });
+        moved = true;
+      }
+    }
+
+    if (!moved && slider.next && i > 0) {
+      // Fallback: walk with next from start
+      for (let n = 0; n < i; n += 1) slider.next.click();
+    }
+
+    // Allow animation / lazy media
+    await new Promise((r) => setTimeout(r, 220));
+
+    const rect = root.getBoundingClientRect();
+    return {
+      ok: true,
+      crop: {
+        x: Math.max(0, rect.left),
+        y: Math.max(0, rect.top),
+        width: Math.min(rect.width, window.innerWidth - Math.max(0, rect.left)),
+        height: Math.min(rect.height, window.innerHeight - Math.max(0, rect.top)),
+        viewportWidth: window.innerWidth,
+        viewportHeight: window.innerHeight
+      },
+      index: i
+    };
+  }
+
+  function restoreSlider(sliderId) {
+    const slider = SLIDER_STATE.byId.get(sliderId);
+    if (!slider) return { ok: true };
+    return goToSliderSlide(sliderId, slider.originalIndex);
+  }
+
+  function getSliderGeometry(sliderId, targetId) {
+    const slider = SLIDER_STATE.byId.get(sliderId);
+    if (!slider) return { ok: false, error: "Slider no encontrado." };
+    const { kind, el: captureEl } = getCaptureRoot(targetId);
+    const rect = slider.el.getBoundingClientRect();
+
+    let top;
+    let left;
+    if (kind === "document") {
+      top = rect.top + window.scrollY;
+      left = rect.left + window.scrollX;
+    } else {
+      const rootRect = captureEl.getBoundingClientRect();
+      top = rect.top - rootRect.top + captureEl.scrollTop;
+      left = rect.left - rootRect.left + captureEl.scrollLeft;
+    }
+
+    return {
+      ok: true,
+      geometry: {
+        top,
+        left,
+        width: rect.width,
+        height: rect.height
+      }
+    };
   }
 
   function extractTextCapture(targetId) {

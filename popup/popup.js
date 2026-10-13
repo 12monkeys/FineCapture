@@ -2,6 +2,7 @@ const targetSelect = document.getElementById("targetSelect");
 const scaleRange = document.getElementById("scaleRange");
 const scaleValue = document.getElementById("scaleValue");
 const hideFixed = document.getElementById("hideFixed");
+const expandSliders = document.getElementById("expandSliders");
 const scalePanel = document.getElementById("scalePanel");
 const cleanPanel = document.getElementById("cleanPanel");
 const modeHint = document.getElementById("modeHint");
@@ -29,6 +30,9 @@ async function init() {
   hideFixed.addEventListener("change", () => {
     chrome.storage.local.set({ fineCaptureHideFixed: hideFixed.checked });
   });
+  expandSliders.addEventListener("change", () => {
+    chrome.storage.local.set({ fineCaptureExpandSliders: expandSliders.checked });
+  });
   document.querySelectorAll('input[name="captureMode"]').forEach((el) => {
     el.addEventListener("change", onModeChange);
   });
@@ -43,7 +47,8 @@ async function init() {
       const pct = Math.round((message.current / message.total) * 100);
       progressWrap.classList.remove("hidden");
       progressBar.style.width = `${pct}%`;
-      setStatus(`Capturando… ${message.current}/${message.total}`);
+      const phaseLabel = message.phase === "slider" ? "Slides" : "Página";
+      setStatus(`${phaseLabel}… ${message.current}/${message.total}`);
     }
     if (message?.type === "PICK_RESULT") {
       selectedTargetId = message.targetId;
@@ -60,9 +65,16 @@ async function init() {
     selectedTargetId = stored.fineCaptureSelectedTarget;
   }
 
-  const prefs = await chrome.storage.local.get(["fineCaptureHideFixed", "fineCaptureMode"]);
+  const prefs = await chrome.storage.local.get([
+    "fineCaptureHideFixed",
+    "fineCaptureMode",
+    "fineCaptureExpandSliders"
+  ]);
   if (typeof prefs.fineCaptureHideFixed === "boolean") {
     hideFixed.checked = prefs.fineCaptureHideFixed;
+  }
+  if (typeof prefs.fineCaptureExpandSliders === "boolean") {
+    expandSliders.checked = prefs.fineCaptureExpandSliders;
   }
   if (prefs.fineCaptureMode === "text" || prefs.fineCaptureMode === "image") {
     const radio = document.querySelector(`input[name="captureMode"][value="${prefs.fineCaptureMode}"]`);
@@ -107,7 +119,7 @@ async function getActiveTab() {
   return tab;
 }
 
-const CONTENT_SCRIPT_VERSION = 5;
+const CONTENT_SCRIPT_VERSION = 6;
 
 async function ensureContent(tabId) {
   let needsInject = true;
@@ -199,7 +211,8 @@ async function runCapture() {
         mode,
         targetId: selectedTargetId,
         scale: Number(scaleRange.value),
-        hideFixedOverlays: hideFixed.checked
+        hideFixedOverlays: hideFixed.checked,
+        expandSliders: expandSliders.checked
       }
     });
 

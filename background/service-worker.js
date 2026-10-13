@@ -44,7 +44,7 @@ async function getActiveTab() {
   return tab;
 }
 
-const CONTENT_SCRIPT_VERSION = 5;
+const CONTENT_SCRIPT_VERSION = 6;
 
 async function ensureContentScript(tabId) {
   let needsInject = true;
@@ -141,6 +141,80 @@ async function startTextCapture(payload) {
   return saveCaptureResult(result);
 }
 
+async function emitProgress(current, total, phase = "page") {
+  await chrome.runtime.sendMessage({
+    type: "CAPTURE_PROGRESS",
+    current,
+    total,
+    phase
+  }).catch(() => {});
+}
+
+async function captureSliderStrips(tab, targetId, scale) {
+  const found = await chrome.tabs.sendMessage(tab.id, {
+    type: "FIND_SLIDERS",
+    targetId
+  });
+
+  if (!found?.ok || !found.sliders?.length) {
+    return [];
+  }
+
+  const strips = [];
+
+  for (const slider of found.sliders) {
+    const slideSlices = [];
+    for (let i = 0; i < slider.slideCount; i += 1) {
+      const positioned = await chrome.tabs.sendMessage(tab.id, {
+        type: "SLIDER_GO_TO",
+        sliderId: slider.id,
+        index: i
+      });
+      if (!positioned?.ok) {
+        throw new Error(positioned?.error || `No se pudo mostrar el slide ${i + 1}.`);
+      }
+
+      await wait(PAINT_SETTLE_MS);
+      const dataUrl = await captureVisibleTabThrottled(tab.windowId);
+      slideSlices.push({
+        dataUrl,
+        crop: positioned.crop,
+        overlap: 0,
+        isLast: i === slider.slideCount - 1
+      });
+
+      await emitProgress(i + 1, slider.slideCount, "slider");
+    }
+
+    await chrome.tabs.sendMessage(tab.id, {
+      type: "SLIDER_RESTORE",
+      sliderId: slider.id
+    }).catch(() => {});
+
+    const stitchedSlides = await stitchInTab(tab.id, slideSlices, scale);
+    const geometry = await chrome.tabs.sendMessage(tab.id, {
+      type: "SLIDER_GEOMETRY",
+      sliderId: slider.id,
+      targetId
+    });
+
+    if (!geometry?.ok) {
+      throw new Error(geometry?.error || "No se pudo medir el slider.");
+    }
+
+    strips.push({
+      id: slider.id,
+      label: slider.label,
+      dataUrl: stitchedSlides.dataUrl,
+      width: stitchedSlides.width,
+      height: stitchedSlides.height,
+      geometry: geometry.geometry
+    });
+  }
+
+  return strips;
+}
+
 async function startImageCapture(payload) {
   const tab = await getActiveTab();
   await ensureContentScript(tab.id);
@@ -148,6 +222,12 @@ async function startImageCapture(payload) {
   const scale = clamp(Number(payload?.scale ?? 100), 10, 100) / 100;
   const targetId = payload?.targetId ?? "document";
   const hideFixedOverlays = payload?.hideFixedOverlays !== false;
+  const expandSliders = Boolean(payload?.expandSliders);
+
+  let sliderStrips = [];
+  if (expandSliders) {
+    sliderStrips = await captureSliderStrips(tab, targetId, scale);
+  }
 
   const prep = await chrome.tabs.sendMessage(tab.id, {
     type: "PREPARE_CAPTURE",
@@ -186,17 +266,17 @@ async function startImageCapture(payload) {
         isLast: i === totalSteps - 1
       });
 
-      await chrome.runtime.sendMessage({
-        type: "CAPTURE_PROGRESS",
-        current: i + 1,
-        total: totalSteps
-      }).catch(() => {});
+      await emitProgress(i + 1, totalSteps, "page");
     }
   } finally {
     await chrome.tabs.sendMessage(tab.id, { type: "CLEANUP_CAPTURE", targetId }).catch(() => {});
   }
 
-  const stitched = await stitchInTab(tab.id, slices, scale);
+  let stitched = await stitchInTab(tab.id, slices, scale);
+
+  if (sliderStrips.length) {
+    stitched = await compositeSlidersInTab(tab.id, stitched, sliderStrips, scale);
+  }
 
   const result = {
     kind: "image",
@@ -206,10 +286,25 @@ async function startImageCapture(payload) {
     scalePercent: Math.round(scale * 100),
     targetLabel: metrics.label,
     pageTitle: tab.title || "captura",
-    capturedAt: Date.now()
+    capturedAt: Date.now(),
+    expandedSliders: sliderStrips.map((s) => s.label)
   };
 
   return saveCaptureResult(result);
+}
+
+async function compositeSlidersInTab(tabId, pageImage, sliderStrips, scale) {
+  const [{ result }] = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: "ISOLATED",
+    func: compositeSliderStripsInPage,
+    args: [pageImage, sliderStrips, scale]
+  });
+
+  if (!result?.ok) {
+    throw new Error(result?.error || "Error al insertar los slides en la captura.");
+  }
+  return result;
 }
 
 async function stitchInTab(tabId, slices, scale) {
@@ -321,6 +416,137 @@ async function stitchSlicesInPage(slices, scale) {
       const trimmed = document.createElement("canvas");
       trimmed.width = canvas.width;
       trimmed.height = destY;
+      trimmed.getContext("2d").drawImage(canvas, 0, 0);
+      return {
+        ok: true,
+        dataUrl: trimmed.toDataURL("image/png"),
+        width: trimmed.width,
+        height: trimmed.height
+      };
+    }
+
+    return {
+      ok: true,
+      dataUrl: canvas.toDataURL("image/png"),
+      width: canvas.width,
+      height: canvas.height
+    };
+  } catch (error) {
+    return { ok: false, error: String(error?.message || error) };
+  }
+}
+
+/**
+ * Replaces each carousel region in the page capture with the vertically
+ * stacked slides strip, shifting content below downward.
+ */
+async function compositeSliderStripsInPage(pageImage, sliderStrips, scale) {
+  const MAX_CANVAS = 16384;
+
+  function loadImage(dataUrl) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = () => reject(new Error("No se pudo leer una imagen para componer."));
+      img.src = dataUrl;
+    });
+  }
+
+  try {
+    if (!pageImage?.dataUrl) {
+      return { ok: false, error: "Falta la captura de página." };
+    }
+
+    const page = await loadImage(pageImage.dataUrl);
+    const strips = [];
+    for (const item of sliderStrips || []) {
+      const img = await loadImage(item.dataUrl);
+      strips.push({ ...item, img });
+    }
+
+    // Sort top-to-bottom so we can accumulate Y shift.
+    strips.sort((a, b) => (a.geometry?.top || 0) - (b.geometry?.top || 0));
+
+    // Geometry is CSS px; strip/page bitmaps are already at capture scale (≈ css * dpr * scale).
+    let cssToPage = scale;
+    if (strips[0]?.geometry?.width > 0 && strips[0].img.width > 0) {
+      cssToPage = strips[0].img.width / Math.max(1, strips[0].geometry.width);
+    }
+
+    let extraHeight = 0;
+    for (const strip of strips) {
+      const regionH = Math.max(1, Math.round((strip.geometry?.height || 0) * cssToPage));
+      extraHeight += Math.max(0, strip.img.height - regionH);
+    }
+
+    let outW = page.width;
+    let outH = page.height + extraHeight;
+    let fit = 1;
+    if (outW > MAX_CANVAS || outH > MAX_CANVAS) {
+      fit = Math.min(MAX_CANVAS / outW, MAX_CANVAS / outH, 1);
+      outW = Math.max(1, Math.floor(outW * fit));
+      outH = Math.max(1, Math.floor(outH * fit));
+    }
+
+    const canvas = document.createElement("canvas");
+    canvas.width = outW;
+    canvas.height = outH;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return { ok: false, error: "Canvas no disponible." };
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
+
+    let srcCursor = 0;
+    let destCursor = 0;
+
+    for (const strip of strips) {
+      const top = Math.max(0, Math.round((strip.geometry?.top || 0) * cssToPage));
+      const regionH = Math.max(1, Math.round((strip.geometry?.height || 0) * cssToPage));
+      const safeTop = Math.min(page.height, Math.max(0, top));
+
+      // Page segment above this carousel.
+      const aboveH = Math.max(0, safeTop - srcCursor);
+      if (aboveH > 0) {
+        const dh = Math.round(aboveH * fit);
+        ctx.drawImage(
+          page,
+          0,
+          srcCursor,
+          page.width,
+          aboveH,
+          0,
+          destCursor,
+          outW,
+          dh
+        );
+        destCursor += dh;
+        srcCursor += aboveH;
+      }
+
+      // Insert stacked slides (scaled to page width).
+      const stripDrawH = Math.round(strip.img.height * fit);
+      const stripDrawW = Math.round(strip.img.width * fit);
+      const x = Math.max(0, Math.round(((strip.geometry?.left || 0) * cssToPage) * fit));
+      ctx.drawImage(strip.img, 0, 0, strip.img.width, strip.img.height, x, destCursor, Math.min(stripDrawW, outW - x), stripDrawH);
+      destCursor += stripDrawH;
+
+      // Skip original carousel region in the page capture.
+      srcCursor = Math.min(page.height, srcCursor + regionH);
+    }
+
+    // Remainder of the page.
+    const rest = page.height - srcCursor;
+    if (rest > 0) {
+      const dh = Math.round(rest * fit);
+      ctx.drawImage(page, 0, srcCursor, page.width, rest, 0, destCursor, outW, dh);
+      destCursor += dh;
+    }
+
+    const finalH = Math.max(1, destCursor);
+    if (finalH < canvas.height) {
+      const trimmed = document.createElement("canvas");
+      trimmed.width = canvas.width;
+      trimmed.height = finalH;
       trimmed.getContext("2d").drawImage(canvas, 0, 0);
       return {
         ok: true,
