@@ -32,6 +32,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
 
+  if (message?.type === "UPDATE_LAST_CAPTURE") {
+    const next = message.payload;
+    if (!next || typeof next !== "object") {
+      sendResponse({ ok: false, error: "Captura inválida." });
+      return false;
+    }
+    lastCaptureMemory = next;
+    chrome.storage.session.set({ [CAPTURE_STORE_KEY]: next }).then(
+      () => sendResponse({ ok: true }),
+      () => sendResponse({ ok: true }) // memory still updated even if quota fails
+    );
+    return true;
+  }
+
   return false;
 });
 

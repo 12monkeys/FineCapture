@@ -1,13 +1,14 @@
 {
   "manifest_version": 3,
   "name": "FineCapture",
-  "version": "1.0.0",
-  "description": "Captura completa de páginas y regiones con scroll, preview y exportación JPG/PNG/WebP.",
+  "version": "1.1.0",
+  "description": "Captura completa de páginas y regiones con scroll, rotulador, preview y exportación JPG/PNG/WebP.",
   "permissions": [
     "activeTab",
     "scripting",
     "storage",
-    "downloads"
+    "downloads",
+    "clipboardWrite"
   ],
   "host_permissions": [
     "<all_urls>"
