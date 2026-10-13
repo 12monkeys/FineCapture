@@ -1,5 +1,5 @@
 (() => {
-  const FC_VERSION = 6;
+  const FC_VERSION = 7;
   if (window.__FC__?.version === FC_VERSION) return;
   if (window.__FC__?.onMessage) {
     chrome.runtime.onMessage.removeListener(window.__FC__.onMessage);
@@ -47,7 +47,9 @@
         cleanupCapture();
         return { ok: true };
       case "EXTRACT_TEXT":
-        return extractTextCapture(message.targetId);
+        return extractTextCapture(message.targetId, {
+          reverseOrder: Boolean(message.reverseOrder)
+        });
       case "FIND_SLIDERS":
         return findSlidersInTarget(message.targetId);
       case "SLIDER_GO_TO":
@@ -878,7 +880,8 @@
     };
   }
 
-  function extractTextCapture(targetId) {
+  function extractTextCapture(targetId, options = {}) {
+    const reverseOrder = Boolean(options.reverseOrder);
     const target = resolveTarget(targetId || "document");
     const root = target.kind === "document"
       ? (document.body || document.documentElement)
@@ -888,8 +891,8 @@
       return { ok: false, error: "No se encontró el nodo para extraer texto." };
     }
 
-    const markdown = extractStructuredText(root, { markdown: true });
-    const text = extractStructuredText(root, { markdown: false });
+    const markdown = extractStructuredText(root, { markdown: true, reverseOrder });
+    const text = extractStructuredText(root, { markdown: false, reverseOrder });
     const label = target.kind === "document"
       ? "Página completa (ventana)"
       : describeElement(root, Number(String(targetId).replace("el-", "")) || 1);
@@ -905,9 +908,19 @@
         markdown,
         charCount: text.length,
         lineCount: text.split(/\n/).length,
-        label
+        label,
+        reverseOrder
       }
     };
+  }
+
+  /** Reverse message/section blocks while keeping each block's internal lines intact. */
+  function reverseTextBlocks(value) {
+    const blocks = String(value || "")
+      .split(/\n{2,}/)
+      .map((block) => block.trim())
+      .filter(Boolean);
+    return blocks.reverse().join("\n\n");
   }
 
   const TEXT_SKIP_TAGS = new Set([
@@ -962,7 +975,7 @@
    * Walks only the selected DOM subtree and keeps titles / block structure
    * (useful for chats, threads and article-like layouts).
    */
-  function extractStructuredText(root, { markdown }) {
+  function extractStructuredText(root, { markdown, reverseOrder }) {
     const lines = [];
 
     const pushBlank = () => {
@@ -1057,6 +1070,11 @@
     };
 
     walk(root);
-    return collapseBlankLines(lines.join("\n"));
+    let output = collapseBlankLines(lines.join("\n"));
+    // Chats often render newest→oldest in the DOM; reverse message blocks for reading order.
+    if (reverseOrder) {
+      output = reverseTextBlocks(output);
+    }
+    return output;
   }
 })();

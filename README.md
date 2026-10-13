@@ -7,7 +7,7 @@ Extensión de Chrome (Manifest V3) para capturar páginas o regiones con scroll 
 1. Detecta la página completa y los contenedores del DOM con scroll.
 2. Permite elegir la zona desde el popup o haciendo clic en la página.
 3. Modo **Imagen**: scroll automático, captura por tramos y une el resultado.
-4. Modo **Solo texto**: extrae el texto visible del DOM de esa zona (ideal para chats), conservando títulos y bloques; exporta TXT o Markdown.
+4. Modo **Solo texto**: extrae el texto visible del DOM de esa zona (ideal para chats), conservando títulos y bloques; opción de orden cronológico (antiguo → reciente); exporta TXT o Markdown.
 5. Abre un preview para descargar imagen (PNG / JPG / WebP) o texto (TXT / MD).
 6. En modo imagen puedes fijar la escala de salida (100% = 1:1) y ocultar overlays flotantes.
 

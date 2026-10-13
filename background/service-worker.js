@@ -44,7 +44,7 @@ async function getActiveTab() {
   return tab;
 }
 
-const CONTENT_SCRIPT_VERSION = 6;
+const CONTENT_SCRIPT_VERSION = 7;
 
 async function ensureContentScript(tabId) {
   let needsInject = true;
@@ -118,9 +118,11 @@ async function startTextCapture(payload) {
   await ensureContentScript(tab.id);
 
   const targetId = payload?.targetId ?? "document";
+  const reverseOrder = Boolean(payload?.reverseTextOrder);
   const extracted = await chrome.tabs.sendMessage(tab.id, {
     type: "EXTRACT_TEXT",
-    targetId
+    targetId,
+    reverseOrder
   });
 
   if (!extracted?.ok) {
@@ -134,6 +136,7 @@ async function startTextCapture(payload) {
     charCount: extracted.result.charCount,
     lineCount: extracted.result.lineCount,
     targetLabel: extracted.result.label,
+    reverseOrder: extracted.result.reverseOrder,
     pageTitle: tab.title || "captura",
     capturedAt: Date.now()
   };
