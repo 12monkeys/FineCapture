@@ -1,5 +1,5 @@
 (() => {
-  const FC_VERSION = 3;
+  const FC_VERSION = 4;
   if (window.__FC__?.version === FC_VERSION) return;
   if (window.__FC__?.onMessage) {
     chrome.runtime.onMessage.removeListener(window.__FC__.onMessage);
@@ -256,11 +256,6 @@
     cleanupCapture();
     const target = resolveTarget(targetId);
     STATE.hideFixedOverlays = Boolean(hideFixedOverlays);
-    collectFixedElements();
-
-    if (STATE.hideFixedOverlays) {
-      setFixedHidden(true);
-    }
 
     if (target.kind === "document") {
       const scrollEl = document.scrollingElement || document.documentElement;
@@ -283,6 +278,11 @@
 
       window.scrollTo(0, 0);
       scrollEl.scrollTop = 0;
+
+      if (STATE.hideFixedOverlays) {
+        collectOverlayElements(null);
+        setOverlaysHidden(true);
+      }
 
       return {
         ok: true,
@@ -319,6 +319,11 @@
     el.scrollIntoView({ block: "center", inline: "nearest" });
     el.scrollTop = 0;
 
+    if (STATE.hideFixedOverlays) {
+      collectOverlayElements(el);
+      setOverlaysHidden(true);
+    }
+
     return {
       ok: true,
       metrics: {
@@ -346,7 +351,7 @@
 
     // Option on: hide overlays on every slice. Option off: leave page as-is.
     if (STATE.hideFixedOverlays) {
-      setFixedHidden(true);
+      setOverlaysHidden(true);
     }
 
     if (cap.kind === "document") {
@@ -406,32 +411,148 @@
     );
   }
 
-  function collectFixedElements() {
-    STATE.hiddenFixed = [];
-    const all = document.querySelectorAll("body *");
-    for (const el of all) {
-      if (!(el instanceof HTMLElement) || isFineCaptureUi(el)) continue;
+  function shouldSkipOverlay(el, scrollTarget) {
+    if (!el || el === document.body || el === document.documentElement) return true;
+    if (isFineCaptureUi(el)) return true;
+    if (scrollTarget) {
+      if (el === scrollTarget) return true;
+      // Never hide ancestors of the scroller (would blank the capture).
+      if (el.contains(scrollTarget)) return true;
+    }
+    return false;
+  }
+
+  function parseEdge(style, name) {
+    const raw = style[name];
+    if (!raw || raw === "auto") return null;
+    const n = parseFloat(raw);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function isPinnedToEdge(style) {
+    const edges = ["top", "right", "bottom", "left"];
+    return edges.some((name) => {
+      const n = parseEdge(style, name);
+      return n !== null && Math.abs(n) <= 2;
+    });
+  }
+
+  /** Absolute bars/FABs that behave like fixed (e.g. Pos(a) B(0) W(100%)). */
+  function isAbsoluteOverlay(el, style, rect) {
+    if (style.position !== "absolute") return false;
+    if (!isPinnedToEdge(style)) return false;
+
+    const z = parseInt(style.zIndex, 10);
+    const hasZ = Number.isFinite(z) && z >= 1;
+    const nearViewportTop = rect.top <= 8;
+    const nearViewportBottom = rect.bottom >= window.innerHeight - 8;
+    const nearViewportLeft = rect.left <= 8;
+    const nearViewportRight = rect.right >= window.innerWidth - 8;
+    const nearEdge = nearViewportTop || nearViewportBottom || nearViewportLeft || nearViewportRight;
+    const wideBar = rect.width >= window.innerWidth * 0.35 && rect.height >= 28 && rect.height <= window.innerHeight * 0.55;
+    const floatingChip = rect.width >= 28 && rect.height >= 28 && rect.width <= window.innerWidth * 0.5;
+
+    if (wideBar && nearEdge) return true;
+    if (floatingChip && nearEdge && (hasZ || nearViewportBottom || nearViewportTop)) return true;
+    if (hasZ && nearEdge && (wideBar || floatingChip)) return true;
+    return false;
+  }
+
+  function rememberOverlay(el, seen) {
+    if (!el || seen.has(el)) return;
+    seen.add(el);
+    STATE.hiddenFixed.push({
+      el,
+      visibility: el.style.getPropertyValue("visibility"),
+      visibilityPriority: el.style.getPropertyPriority("visibility"),
+      opacity: el.style.getPropertyValue("opacity"),
+      opacityPriority: el.style.getPropertyPriority("opacity"),
+      pointerEvents: el.style.getPropertyValue("pointer-events"),
+      pointerEventsPriority: el.style.getPropertyPriority("pointer-events"),
+      hidden: false
+    });
+  }
+
+  /**
+   * Elements whose viewport position barely changes when the capture target scrolls
+   * are visually "fixed" even with position:absolute (common in SPA shells).
+   */
+  function findViewportAnchored(scrollTarget) {
+    const maxScroll = scrollTarget
+      ? scrollTarget.scrollHeight - scrollTarget.clientHeight
+      : Math.max(
+          document.documentElement.scrollHeight,
+          document.body?.scrollHeight || 0
+        ) - window.innerHeight;
+
+    if (maxScroll < 40) return [];
+
+    const delta = Math.min(140, Math.floor(maxScroll));
+    const samples = [];
+    const nodes = document.querySelectorAll("body *");
+
+    for (const el of nodes) {
+      if (!(el instanceof HTMLElement) || shouldSkipOverlay(el, scrollTarget)) continue;
       const style = getComputedStyle(el);
-      const pos = style.position;
-      if (pos !== "fixed" && pos !== "sticky") continue;
       if (style.display === "none" || style.visibility === "hidden") continue;
+      if (parseFloat(style.opacity || "1") === 0) continue;
+
+      const pos = style.position;
+      if (pos !== "fixed" && pos !== "sticky" && pos !== "absolute") continue;
+
+      const rect = el.getBoundingClientRect();
+      if (rect.width < 8 || rect.height < 8) continue;
+      if (rect.bottom < 0 || rect.top > window.innerHeight || rect.right < 0 || rect.left > window.innerWidth) {
+        continue;
+      }
+
+      samples.push({ el, top: rect.top, left: rect.left });
+    }
+
+    const before = scrollTarget ? scrollTarget.scrollTop : window.scrollY;
+    if (scrollTarget) scrollTarget.scrollTop = before + delta;
+    else window.scrollTo(window.scrollX, before + delta);
+
+    const anchored = [];
+    for (const sample of samples) {
+      const rect = sample.el.getBoundingClientRect();
+      if (Math.abs(rect.top - sample.top) <= 1.5 && Math.abs(rect.left - sample.left) <= 1.5) {
+        anchored.push(sample.el);
+      }
+    }
+
+    if (scrollTarget) scrollTarget.scrollTop = before;
+    else window.scrollTo(window.scrollX, before);
+
+    return anchored;
+  }
+
+  function collectOverlayElements(scrollTarget) {
+    STATE.hiddenFixed = [];
+    const seen = new Set();
+    const all = document.querySelectorAll("body *");
+
+    for (const el of all) {
+      if (!(el instanceof HTMLElement) || shouldSkipOverlay(el, scrollTarget)) continue;
+      const style = getComputedStyle(el);
+      if (style.display === "none" || style.visibility === "hidden") continue;
+
       const rect = el.getBoundingClientRect();
       if (rect.width < 2 && rect.height < 2) continue;
 
-      STATE.hiddenFixed.push({
-        el,
-        visibility: el.style.getPropertyValue("visibility"),
-        visibilityPriority: el.style.getPropertyPriority("visibility"),
-        opacity: el.style.getPropertyValue("opacity"),
-        opacityPriority: el.style.getPropertyPriority("opacity"),
-        pointerEvents: el.style.getPropertyValue("pointer-events"),
-        pointerEventsPriority: el.style.getPropertyPriority("pointer-events"),
-        hidden: false
-      });
+      const pos = style.position;
+      if (pos === "fixed" || pos === "sticky" || isAbsoluteOverlay(el, style, rect)) {
+        rememberOverlay(el, seen);
+      }
+    }
+
+    for (const el of findViewportAnchored(scrollTarget)) {
+      if (shouldSkipOverlay(el, scrollTarget)) continue;
+      rememberOverlay(el, seen);
     }
   }
 
-  function setFixedHidden(hidden) {
+  function setOverlaysHidden(hidden) {
     for (const item of STATE.hiddenFixed) {
       if (hidden && !item.hidden) {
         item.el.style.setProperty("visibility", "hidden", "important");
@@ -458,7 +579,7 @@
   }
 
   function restoreFixedElements() {
-    setFixedHidden(false);
+    setOverlaysHidden(false);
     STATE.hiddenFixed = [];
   }
 
