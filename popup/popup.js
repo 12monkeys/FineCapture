@@ -1,6 +1,7 @@
 const targetSelect = document.getElementById("targetSelect");
 const scaleRange = document.getElementById("scaleRange");
 const scaleValue = document.getElementById("scaleValue");
+const hideFixed = document.getElementById("hideFixed");
 const statusEl = document.getElementById("status");
 const progressWrap = document.getElementById("progressWrap");
 const progressBar = document.getElementById("progressBar");
@@ -21,6 +22,9 @@ async function init() {
   document.getElementById("pickOnPage").addEventListener("click", pickOnPage);
   document.getElementById("openPreview").addEventListener("click", openPreview);
   captureBtn.addEventListener("click", runCapture);
+  hideFixed.addEventListener("change", () => {
+    chrome.storage.local.set({ fineCaptureHideFixed: hideFixed.checked });
+  });
   targetSelect.addEventListener("change", () => {
     selectedTargetId = targetSelect.value;
     chrome.storage.session.set({ fineCaptureSelectedTarget: selectedTargetId });
@@ -49,6 +53,11 @@ async function init() {
     selectedTargetId = stored.fineCaptureSelectedTarget;
   }
 
+  const prefs = await chrome.storage.local.get("fineCaptureHideFixed");
+  if (typeof prefs.fineCaptureHideFixed === "boolean") {
+    hideFixed.checked = prefs.fineCaptureHideFixed;
+  }
+
   await loadTargets();
   await showLastCapture();
 }
@@ -67,10 +76,17 @@ async function getActiveTab() {
   return tab;
 }
 
+const CONTENT_SCRIPT_VERSION = 3;
+
 async function ensureContent(tabId) {
+  let needsInject = true;
   try {
-    await chrome.tabs.sendMessage(tabId, { type: "PING" });
+    const ping = await chrome.tabs.sendMessage(tabId, { type: "PING" });
+    needsInject = ping?.version !== CONTENT_SCRIPT_VERSION;
   } catch {
+    needsInject = true;
+  }
+  if (needsInject) {
     await chrome.scripting.insertCSS({ target: { tabId }, files: ["content/content.css"] });
     await chrome.scripting.executeScript({ target: { tabId }, files: ["content/content.js"] });
   }
@@ -149,7 +165,8 @@ async function runCapture() {
       type: "START_CAPTURE",
       payload: {
         targetId: selectedTargetId,
-        scale: Number(scaleRange.value)
+        scale: Number(scaleRange.value),
+        hideFixedOverlays: hideFixed.checked
       }
     });
 

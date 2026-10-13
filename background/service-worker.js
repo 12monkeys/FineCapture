@@ -44,10 +44,18 @@ async function getActiveTab() {
   return tab;
 }
 
+const CONTENT_SCRIPT_VERSION = 3;
+
 async function ensureContentScript(tabId) {
+  let needsInject = true;
   try {
-    await chrome.tabs.sendMessage(tabId, { type: "PING" });
+    const ping = await chrome.tabs.sendMessage(tabId, { type: "PING" });
+    needsInject = ping?.version !== CONTENT_SCRIPT_VERSION;
   } catch {
+    needsInject = true;
+  }
+
+  if (needsInject) {
     await chrome.scripting.insertCSS({ target: { tabId }, files: ["content/content.css"] });
     await chrome.scripting.executeScript({ target: { tabId }, files: ["content/content.js"] });
     await wait(80);
@@ -92,10 +100,12 @@ async function startCapture(payload) {
 
   const scale = clamp(Number(payload?.scale ?? 100), 10, 100) / 100;
   const targetId = payload?.targetId ?? "document";
+  const hideFixedOverlays = payload?.hideFixedOverlays !== false;
 
   const prep = await chrome.tabs.sendMessage(tab.id, {
     type: "PREPARE_CAPTURE",
-    targetId
+    targetId,
+    hideFixedOverlays
   });
 
   if (!prep?.ok) {

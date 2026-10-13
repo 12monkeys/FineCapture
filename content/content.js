@@ -1,26 +1,34 @@
 (() => {
-  if (window.__FINECAPTURE_LOADED__) return;
-  window.__FINECAPTURE_LOADED__ = true;
+  const FC_VERSION = 3;
+  if (window.__FC__?.version === FC_VERSION) return;
+  if (window.__FC__?.onMessage) {
+    chrome.runtime.onMessage.removeListener(window.__FC__.onMessage);
+  }
 
   const STATE = {
     picking: false,
     targets: [],
     selectedId: null,
     capture: null,
-    hiddenFixed: []
+    hiddenFixed: [],
+    hideFixedOverlays: true
   };
 
-  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  function onMessage(message, _sender, sendResponse) {
     handleMessage(message)
       .then((result) => sendResponse(result))
       .catch((error) => sendResponse({ ok: false, error: String(error?.message || error) }));
     return true;
-  });
+  }
+
+  chrome.runtime.onMessage.addListener(onMessage);
+  window.__FC__ = { version: FC_VERSION, onMessage };
+  window.__FINECAPTURE_LOADED__ = true;
 
   async function handleMessage(message) {
     switch (message?.type) {
       case "PING":
-        return { ok: true };
+        return { ok: true, version: FC_VERSION };
       case "LIST_SCROLL_TARGETS":
         return { ok: true, targets: listScrollTargets() };
       case "START_PICKER":
@@ -32,7 +40,7 @@
         highlightTarget(message.targetId);
         return { ok: true };
       case "PREPARE_CAPTURE":
-        return prepareCapture(message.targetId);
+        return prepareCapture(message.targetId, message.hideFixedOverlays !== false);
       case "SCROLL_TO_STEP":
         return scrollToStep(message.targetId, message.step, message.metrics);
       case "CLEANUP_CAPTURE":
@@ -244,10 +252,15 @@
     setTimeout(() => ring.remove(), 1600);
   }
 
-  function prepareCapture(targetId) {
+  function prepareCapture(targetId, hideFixedOverlays = true) {
     cleanupCapture();
     const target = resolveTarget(targetId);
+    STATE.hideFixedOverlays = Boolean(hideFixedOverlays);
     collectFixedElements();
+
+    if (STATE.hideFixedOverlays) {
+      setFixedHidden(true);
+    }
 
     if (target.kind === "document") {
       const scrollEl = document.scrollingElement || document.documentElement;
@@ -279,7 +292,9 @@
           totalHeight,
           viewportH,
           viewportW,
-          kind: "document"
+          kind: "document",
+          hideFixedOverlays: STATE.hideFixedOverlays,
+          hiddenOverlayCount: STATE.hiddenFixed.length
         }
       };
     }
@@ -313,6 +328,8 @@
         viewportH,
         viewportW: el.clientWidth,
         kind: "element",
+        hideFixedOverlays: STATE.hideFixedOverlays,
+        hiddenOverlayCount: STATE.hiddenFixed.length,
         initialRect: {
           x: rect.left,
           y: rect.top,
@@ -327,8 +344,10 @@
     const cap = STATE.capture;
     if (!cap) throw new Error("Captura no preparada.");
 
-    // Keep fixed/sticky visible only on the first slice to avoid repeated headers.
-    setFixedHidden(step > 0);
+    // Option on: hide overlays on every slice. Option off: leave page as-is.
+    if (STATE.hideFixedOverlays) {
+      setFixedHidden(true);
+    }
 
     if (cap.kind === "document") {
       const y = Math.min(step * metrics.viewportH, Math.max(0, metrics.totalHeight - metrics.viewportH));
@@ -379,28 +398,62 @@
     };
   }
 
+  function isFineCaptureUi(el) {
+    return Boolean(
+      el.closest?.("#finecapture-picker-root") ||
+      el.classList?.contains("fc-highlight-ring") ||
+      el.id === "finecapture-picker-root"
+    );
+  }
+
   function collectFixedElements() {
     STATE.hiddenFixed = [];
     const all = document.querySelectorAll("body *");
     for (const el of all) {
-      if (!(el instanceof HTMLElement)) continue;
+      if (!(el instanceof HTMLElement) || isFineCaptureUi(el)) continue;
       const style = getComputedStyle(el);
-      if (style.position === "fixed" || style.position === "sticky") {
-        STATE.hiddenFixed.push({ el, visibility: el.style.visibility, hidden: false });
-      }
+      const pos = style.position;
+      if (pos !== "fixed" && pos !== "sticky") continue;
+      if (style.display === "none" || style.visibility === "hidden") continue;
+      const rect = el.getBoundingClientRect();
+      if (rect.width < 2 && rect.height < 2) continue;
+
+      STATE.hiddenFixed.push({
+        el,
+        visibility: el.style.getPropertyValue("visibility"),
+        visibilityPriority: el.style.getPropertyPriority("visibility"),
+        opacity: el.style.getPropertyValue("opacity"),
+        opacityPriority: el.style.getPropertyPriority("opacity"),
+        pointerEvents: el.style.getPropertyValue("pointer-events"),
+        pointerEventsPriority: el.style.getPropertyPriority("pointer-events"),
+        hidden: false
+      });
     }
   }
 
   function setFixedHidden(hidden) {
     for (const item of STATE.hiddenFixed) {
       if (hidden && !item.hidden) {
-        item.visibility = item.el.style.visibility;
-        item.el.style.visibility = "hidden";
+        item.el.style.setProperty("visibility", "hidden", "important");
+        item.el.style.setProperty("opacity", "0", "important");
+        item.el.style.setProperty("pointer-events", "none", "important");
+        item.el.setAttribute("data-finecapture-hidden", "1");
         item.hidden = true;
       } else if (!hidden && item.hidden) {
-        item.el.style.visibility = item.visibility;
+        restoreStyleProp(item.el, "visibility", item.visibility, item.visibilityPriority);
+        restoreStyleProp(item.el, "opacity", item.opacity, item.opacityPriority);
+        restoreStyleProp(item.el, "pointer-events", item.pointerEvents, item.pointerEventsPriority);
+        item.el.removeAttribute("data-finecapture-hidden");
         item.hidden = false;
       }
+    }
+  }
+
+  function restoreStyleProp(el, name, value, priority) {
+    if (value) {
+      el.style.setProperty(name, value, priority || "");
+    } else {
+      el.style.removeProperty(name);
     }
   }
 

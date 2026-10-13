@@ -30,4 +30,4 @@ Extensión de Chrome (Manifest V3) para capturar páginas o regiones con scroll 
 
 - No captura páginas internas del navegador (`chrome://`, `edge://`, Web Store, etc.).
 - Páginas muy altas pueden verse limitadas por el tamaño máximo de canvas del navegador (~16384 px). Usa una escala menor si ocurre.
-- Durante la captura se ocultan temporalmente elementos `fixed`/`sticky` para evitar duplicados en cada tramo.
+- Opción **Ocultar fixed / sticky** (activada por defecto): esconde headers, cookies, chats y overlays flotantes durante toda la captura para que no manchen el resultado.
