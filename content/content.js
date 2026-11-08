@@ -1,5 +1,5 @@
 (() => {
-  const FC_VERSION = 11;
+  const FC_VERSION = 12;
   if (window.__FC__?.version === FC_VERSION) return;
   if (window.__FC__?.onMessage) {
     chrome.runtime.onMessage.removeListener(window.__FC__.onMessage);
@@ -14,7 +14,8 @@
     hiddenFixed: [],
     hideFixedOverlays: true,
     pickerChain: [],
-    pickerIndex: 0
+    pickerIndex: 0,
+    navLockUntil: 0
   };
 
   function onMessage(message, _sender, sendResponse) {
@@ -34,6 +35,10 @@
         return { ok: true, version: FC_VERSION };
       case "LIST_SCROLL_TARGETS":
         return { ok: true, targets: listScrollTargets() };
+      case "RESOLVE_SELECTION":
+        return resolveSelection(message.meta || message);
+      case "DESCRIBE_TARGET":
+        return describeTargetResponse(message.targetId);
       case "START_PICKER":
         return startPicker();
       case "STOP_PICKER":
@@ -70,8 +75,15 @@
   }
 
   function listScrollTargets() {
+    const preserveId = STATE.selectedId && STATE.selectedId !== "document" ? STATE.selectedId : null;
+    let preserveEl = preserveId ? STATE.elById.get(preserveId) : null;
+    if (preserveId && (!preserveEl || !preserveEl.isConnected)) {
+      preserveEl = findElementByStoredId(preserveId);
+    }
+
     STATE.elById = new Map();
     const targets = [];
+    const usedIds = new Set(["document"]);
 
     const docEl = document.documentElement;
     const body = document.body;
@@ -83,16 +95,7 @@
     );
     const pageClientHeight = window.innerHeight;
 
-    targets.push({
-      id: "document",
-      label: "Página completa (ventana)",
-      kind: "document",
-      scrollHeight: pageScrollHeight,
-      clientHeight: pageClientHeight,
-      scrollable: pageScrollHeight > pageClientHeight + 2,
-      selectorHint: "html / body",
-      score: 0
-    });
+    targets.push(buildDocumentTarget(pageScrollHeight, pageClientHeight));
 
     const candidates = [];
     const walker = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_ELEMENT);
@@ -123,24 +126,77 @@
 
     let index = 0;
     for (const item of kept.slice(0, 36)) {
-      index += 1;
-      const id = `el-${index}`;
-      const rect = item.el.getBoundingClientRect();
-      registerTargetEl(item.el, id);
-      targets.push({
-        id,
-        label: describeElement(item.el, index),
-        kind: item.overflow ? "element" : "region",
-        scrollHeight: item.scrollHeight,
-        clientHeight: item.clientHeight,
-        scrollable: item.overflow || item.scrollHeight > pageClientHeight + 2,
-        selectorHint: shortSelector(item.el),
-        score: Math.round(item.score),
-        rect: { width: Math.round(rect.width), height: Math.round(rect.height) }
-      });
+      let id;
+      if (preserveEl && item.el === preserveEl && preserveId) {
+        id = preserveId;
+      } else {
+        do {
+          index += 1;
+          id = `el-${index}`;
+        } while (usedIds.has(id) || (preserveId && id === preserveId && item.el !== preserveEl));
+      }
+      usedIds.add(id);
+      targets.push(buildElementTarget(item.el, id, item));
+    }
+
+    if (preserveEl?.isConnected && !STATE.elById.has(preserveId)) {
+      const overflow = isOverflowScrollable(preserveEl);
+      targets.push(
+        buildElementTarget(preserveEl, preserveId, {
+          overflow,
+          score: scoreCaptureContainer(preserveEl),
+          scrollHeight: Math.max(preserveEl.scrollHeight, preserveEl.offsetHeight),
+          clientHeight: overflow ? preserveEl.clientHeight : pageClientHeight
+        })
+      );
     }
 
     return targets;
+  }
+
+  function buildDocumentTarget(pageScrollHeight, pageClientHeight) {
+    return {
+      id: "document",
+      label: "Página completa (ventana)",
+      kind: "document",
+      kindLabel: "página",
+      scrollHeight: pageScrollHeight,
+      clientHeight: pageClientHeight,
+      scrollable: pageScrollHeight > pageClientHeight + 2,
+      selectorHint: "html / body",
+      score: 0,
+      nesting: 0,
+      childCount: 0,
+      sizeLabel: `${pageClientHeight}px alto`
+    };
+  }
+
+  function buildElementTarget(el, id, item) {
+    const rect = el.getBoundingClientRect();
+    const overflow = Boolean(item?.overflow ?? isOverflowScrollable(el));
+    const kind = overflow ? "element" : "region";
+    const containerKind = classifyContainer(el);
+    const kids = [...el.children].filter(isMeaningfulChild).length;
+    const w = Math.round(rect.width || el.offsetWidth || 0);
+    const h = Math.round(Math.max(el.offsetHeight, el.scrollHeight) || 0);
+    registerTargetEl(el, id);
+    return {
+      id,
+      label: describeElement(el),
+      kind,
+      kindLabel: kindLabelEs(containerKind),
+      containerKind,
+      scrollHeight: item?.scrollHeight ?? Math.max(el.scrollHeight, el.offsetHeight),
+      clientHeight: item?.clientHeight ?? (overflow ? el.clientHeight : window.innerHeight),
+      scrollable: overflow || Math.max(el.scrollHeight, el.offsetHeight) > window.innerHeight + 2,
+      selectorHint: friendlyHint(el),
+      score: Math.round(item?.score ?? scoreCaptureContainer(el)),
+      rect: { width: w, height: h },
+      nesting: nestingDepth(el),
+      childCount: kids,
+      sizeLabel: `${w}×${h}`,
+      fingerprint: elementFingerprint(el)
+    };
   }
 
   function registerTargetEl(el, id) {
@@ -366,13 +422,8 @@
   }
 
   function levelLabel(item, index, total) {
-    const hint = shortSelector(item.el);
-    const role = item.el.getAttribute("role");
-    const aria = item.el.getAttribute("aria-label");
-    const kids = [...item.el.children].filter(isMeaningfulChild).length;
-    const kind = item.overflow ? "scroll" : "región";
-    const detail = aria ? aria.slice(0, 28) : role ? `role=${role}` : `${kids} hijos`;
-    return `${index + 1}/${total} · ${hint} · ${detail} · ${kind}`;
+    const label = describeElement(item.el);
+    return `${index + 1}/${total} · ${label}`;
   }
 
   function ensureTargetForElement(el) {
@@ -384,20 +435,21 @@
     if (el.__fineCaptureId && STATE.elById.get(el.__fineCaptureId) === el) {
       return el.__fineCaptureId;
     }
-    const id = `el-${STATE.elById.size + 1}`;
-    registerTargetEl(el, id);
+    let n = STATE.elById.size + 1;
+    let id = `el-${n}`;
+    while (STATE.elById.has(id)) {
+      n += 1;
+      id = `el-${n}`;
+    }
     const overflow = isOverflowScrollable(el);
-    STATE.targets = targets;
-    STATE.targets.push({
-      id,
-      label: describeElement(el, STATE.elById.size),
-      kind: overflow ? "element" : "region",
+    const descriptor = buildElementTarget(el, id, {
+      overflow,
+      score: scoreCaptureContainer(el),
       scrollHeight: Math.max(el.scrollHeight, el.offsetHeight),
-      clientHeight: overflow ? el.clientHeight : window.innerHeight,
-      scrollable: overflow || Math.max(el.scrollHeight, el.offsetHeight) > window.innerHeight + 2,
-      selectorHint: shortSelector(el),
-      score: Math.round(scoreCaptureContainer(el))
+      clientHeight: overflow ? el.clientHeight : window.innerHeight
     });
+    STATE.targets = targets;
+    STATE.targets.push(descriptor);
     return id;
   }
 
@@ -411,20 +463,270 @@
     return null;
   }
 
-  function describeElement(el, index) {
-    const tag = el.tagName.toLowerCase();
-    const id = el.id ? `#${el.id}` : "";
-    const cls = el.classList?.[0] ? `.${el.classList[0]}` : "";
+  function isHashedClass(name) {
+    if (!name || name.length > 48) return true;
+    if (/^(css-|sc-|emotion-|jsx-|svelte-)/i.test(name)) return true;
+    if (/^[a-z]{1,3}[-_][a-z0-9]{5,}$/i.test(name) && /\d/.test(name)) return true;
+    if (/[a-f0-9]{6,}/i.test(name) && !/^(xs|sm|md|lg|xl|2xl)/i.test(name)) return true;
+    if (/^_[A-Za-z0-9]+/.test(name)) return true;
+    return false;
+  }
+
+  function stableClasses(el, limit = 2) {
+    if (!el?.classList?.length) return [];
+    return [...el.classList].filter((c) => !isHashedClass(c)).slice(0, limit);
+  }
+
+  function nestingDepth(el) {
+    let depth = 0;
+    let n = el?.parentElement;
+    while (n && n !== document.documentElement && n !== document.body) {
+      depth += 1;
+      n = n.parentElement;
+    }
+    return depth;
+  }
+
+  function classifyContainer(el) {
+    if (!(el instanceof HTMLElement)) return "region";
+    const style = getComputedStyle(el);
+    const overflow = isOverflowScrollable(el);
+    const role = (el.getAttribute("role") || "").toLowerCase();
+    const aria = (el.getAttribute("aria-label") || "").toLowerCase();
+    const cls = typeof el.className === "string" ? el.className.toLowerCase() : "";
+    const hint = `${aria} ${cls} ${role} ${el.id || ""}`.toLowerCase();
+    const kids = [...el.children].filter(isMeaningfulChild).length;
+
+    if (/chat|message|messages|conversation|thread|inbox/.test(hint) || role === "log") return "chat";
+    if (style.display === "grid" || style.display === "inline-grid" || role === "grid") return "grid";
+    if (role === "list" || role === "feed" || role === "directory" || /timeline|feed|list/.test(hint)) return "list";
+    if (/result|results|product|products|catalog|cards|itemcard|item-card/.test(hint)) return "results";
+    if (role === "main" || el.tagName === "MAIN") return "main";
+    if (el.tagName === "ARTICLE" || role === "article") return "article";
+    if (overflow) return "scroll";
+    if (kids >= 6) return "list";
+    return "region";
+  }
+
+  function kindLabelEs(kind) {
+    const map = {
+      chat: "Chat / mensajes",
+      grid: "Contenedor grid",
+      list: "Lista",
+      scroll: "Zona con scroll",
+      results: "Región de resultados",
+      main: "Contenido principal",
+      article: "Artículo",
+      region: "Región",
+      document: "Página completa",
+      element: "Zona con scroll"
+    };
+    return map[kind] || "Zona";
+  }
+
+  function friendlyHint(el) {
+    if (!el) return "";
+    const aria = el.getAttribute("aria-label");
+    if (aria) return aria.slice(0, 40);
     const role = el.getAttribute("role");
-    const name = [tag, id, cls].join("") + (role ? ` [role=${role}]` : "");
-    return `Zona ${index}: ${name}`;
+    if (el.id && !/^[a-z]?[a-f0-9-]{8,}$/i.test(el.id)) return `#${el.id}`;
+    const classes = stableClasses(el, 1);
+    if (classes.length) return `.${classes[0]}`;
+    if (role) return `role=${role}`;
+    return el.tagName.toLowerCase();
+  }
+
+  function describeElement(el) {
+    if (!el || el === document.documentElement || el === document.body) {
+      return "Página completa (ventana)";
+    }
+    const containerKind = classifyContainer(el);
+    const kids = [...el.children].filter(isMeaningfulChild).length;
+    const rect = el.getBoundingClientRect();
+    const w = Math.round(rect.width || el.offsetWidth || 0);
+    const h = Math.round(Math.max(el.offsetHeight, el.scrollHeight) || 0);
+    const depth = nestingDepth(el);
+    const aria = (el.getAttribute("aria-label") || "").trim();
+    const parts = [kindLabelEs(containerKind)];
+    if (aria) parts.push(`«${aria.slice(0, 36)}»`);
+    else if (kids >= 2) parts.push(`${kids} elementos`);
+    if (w || h) parts.push(`${w}×${h}`);
+    if (depth > 2) parts.push(`anidado ${depth}`);
+    return parts.join(" · ");
   }
 
   function shortSelector(el) {
     const tag = el.tagName.toLowerCase();
-    if (el.id) return `${tag}#${el.id}`;
-    if (el.classList?.length) return `${tag}.${[...el.classList].slice(0, 2).join(".")}`;
+    if (el.id && !isHashedClass(el.id)) return `${tag}#${el.id}`;
+    const classes = stableClasses(el, 2);
+    if (classes.length) return `${tag}.${classes.join(".")}`;
     return tag;
+  }
+
+  function elementFingerprint(el) {
+    if (!(el instanceof HTMLElement)) return null;
+    const rect = el.getBoundingClientRect();
+    return {
+      tag: el.tagName.toLowerCase(),
+      id: el.id || "",
+      role: el.getAttribute("role") || "",
+      aria: (el.getAttribute("aria-label") || "").slice(0, 80),
+      classes: stableClasses(el, 3),
+      kids: [...el.children].filter(isMeaningfulChild).length,
+      w: Math.round(rect.width || el.offsetWidth || 0),
+      h: Math.round(Math.max(el.offsetHeight, el.scrollHeight) || 0),
+      nesting: nestingDepth(el)
+    };
+  }
+
+  function fingerprintScore(el, fp) {
+    if (!el || !fp) return -Infinity;
+    let score = 0;
+    if (el.tagName.toLowerCase() !== fp.tag) return -Infinity;
+    if (fp.id) {
+      if (el.id === fp.id) score += 100;
+      else return -Infinity;
+    }
+    if (fp.role) score += (el.getAttribute("role") || "") === fp.role ? 20 : -8;
+    if (fp.aria) {
+      const aria = el.getAttribute("aria-label") || "";
+      score += aria === fp.aria ? 30 : aria.includes(fp.aria.slice(0, 12)) ? 10 : -5;
+    }
+    const classes = new Set(stableClasses(el, 6));
+    const matched = (fp.classes || []).filter((c) => classes.has(c)).length;
+    score += matched * 12;
+    const kids = [...el.children].filter(isMeaningfulChild).length;
+    score += Math.max(0, 14 - Math.abs(kids - (fp.kids || 0)));
+    const rect = el.getBoundingClientRect();
+    const w = Math.round(rect.width || el.offsetWidth || 0);
+    const h = Math.round(Math.max(el.offsetHeight, el.scrollHeight) || 0);
+    if (fp.w) score += Math.max(0, 16 - Math.abs(w - fp.w) / Math.max(40, fp.w / 8));
+    if (fp.h) score += Math.max(0, 16 - Math.abs(h - fp.h) / Math.max(80, fp.h / 10));
+    score += Math.max(0, 8 - Math.abs(nestingDepth(el) - (fp.nesting || 0)));
+    return score;
+  }
+
+  function findElementByFingerprint(fp) {
+    if (!fp) return null;
+    let best = null;
+    let bestScore = 40;
+    if (fp.id) {
+      const byId = document.getElementById(fp.id);
+      if (byId instanceof HTMLElement && fingerprintScore(byId, fp) > 40) return byId;
+    }
+    const walker = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_ELEMENT);
+    let node = walker.currentNode;
+    while (node) {
+      if (node instanceof HTMLElement && node.tagName.toLowerCase() === fp.tag) {
+        const score = fingerprintScore(node, fp);
+        if (score > bestScore) {
+          bestScore = score;
+          best = node;
+        }
+      }
+      node = walker.nextNode();
+    }
+    return best;
+  }
+
+  function findElementByStoredId(targetId) {
+    if (!targetId || targetId === "document") return null;
+    for (const el of document.querySelectorAll("*")) {
+      if (el.__fineCaptureId === targetId && el instanceof HTMLElement) return el;
+    }
+    return null;
+  }
+
+  function selectionMetaFor(targetId) {
+    if (!targetId || targetId === "document") {
+      return {
+        targetId: "document",
+        label: "Página completa (ventana)",
+        kind: "document",
+        kindLabel: "página",
+        fingerprint: null
+      };
+    }
+    const el = STATE.elById.get(targetId) || findElementByStoredId(targetId);
+    if (!el) {
+      return { targetId, label: targetId, kind: "region", kindLabel: "región", fingerprint: null };
+    }
+    const overflow = isOverflowScrollable(el);
+    const containerKind = classifyContainer(el);
+    return {
+      targetId,
+      label: describeElement(el),
+      kind: overflow ? "element" : "region",
+      kindLabel: kindLabelEs(containerKind),
+      containerKind,
+      fingerprint: elementFingerprint(el),
+      sizeLabel: (() => {
+        const rect = el.getBoundingClientRect();
+        return `${Math.round(rect.width || 0)}×${Math.round(Math.max(el.offsetHeight, el.scrollHeight) || 0)}`;
+      })(),
+      nesting: nestingDepth(el),
+      childCount: [...el.children].filter(isMeaningfulChild).length
+    };
+  }
+
+  function persistSelection(meta) {
+    STATE.selectedId = meta.targetId;
+    chrome.storage.session
+      .set({
+        fineCaptureSelectedTarget: meta.targetId,
+        fineCaptureSelectedMeta: meta
+      })
+      .catch(() => {});
+  }
+
+  function resolveSelection(meta) {
+    const incoming = meta || {};
+    const targetId = incoming.targetId || incoming.id || "document";
+    if (targetId === "document" && !incoming.fingerprint) {
+      STATE.selectedId = "document";
+      const resolved = selectionMetaFor("document");
+      persistSelection(resolved);
+      return { ok: true, ...resolved };
+    }
+
+    let el = null;
+    if (targetId && targetId !== "document") {
+      el = STATE.elById.get(targetId);
+      if (!el?.isConnected) el = findElementByStoredId(targetId);
+    }
+    if (!el?.isConnected && incoming.fingerprint) {
+      el = findElementByFingerprint(incoming.fingerprint);
+    }
+    if (!el?.isConnected) {
+      listScrollTargets();
+      if (targetId && targetId !== "document") {
+        el = STATE.elById.get(targetId) || findElementByStoredId(targetId);
+      }
+      if (!el?.isConnected && incoming.fingerprint) {
+        el = findElementByFingerprint(incoming.fingerprint);
+      }
+    }
+    if (!el?.isConnected) {
+      return { ok: false, error: "No se pudo reencontrar la zona elegida. Vuelve a seleccionarla en la página." };
+    }
+
+    const id = ensureTargetForElement(el);
+    STATE.selectedId = id;
+    const resolved = selectionMetaFor(id);
+    persistSelection(resolved);
+    return { ok: true, ...resolved };
+  }
+
+  function describeTargetResponse(targetId) {
+    try {
+      if (targetId && targetId !== "document" && !STATE.elById.get(targetId)) {
+        listScrollTargets();
+      }
+      const meta = selectionMetaFor(targetId || "document");
+      return { ok: true, ...meta };
+    } catch (error) {
+      return { ok: false, error: String(error?.message || error) };
+    }
   }
 
   function resolveTarget(targetId) {
@@ -479,30 +781,33 @@
       const badge = document.createElement("button");
       badge.type = "button";
       badge.className = "fc-picker-badge";
-      badge.textContent = t.label.replace(/^Zona /, "#");
-      badge.title = `${t.selectorHint} · score ${t.score ?? "—"} · ${t.kind}`;
+      badge.textContent = (t.kindLabel || t.label).slice(0, 42);
+      badge.title = t.label;
       badge.dataset.targetId = t.id;
       positionBadge(badge, target.el);
       root.appendChild(badge);
-      badge.addEventListener("click", (e) => {
-        e.preventDefault();
-        e.stopPropagation();
+      const pickBadge = (e) => {
+        killNavEvent(e);
         finishPick(t.id);
-      });
+      };
+      badge.addEventListener("pointerdown", pickBadge);
+      badge.addEventListener("click", pickBadge);
     });
 
     const docChip = document.createElement("button");
     docChip.type = "button";
     docChip.className = "fc-picker-doc";
     docChip.textContent = "Capturar página completa";
-    docChip.addEventListener("click", (e) => {
-      e.preventDefault();
-      e.stopPropagation();
+    const pickDoc = (e) => {
+      killNavEvent(e);
       finishPick("document");
-    });
+    };
+    docChip.addEventListener("pointerdown", pickDoc);
+    docChip.addEventListener("click", pickDoc);
     root.appendChild(docChip);
 
-    root.querySelector(".fc-picker-cancel")?.addEventListener("click", () => {
+    root.querySelector(".fc-picker-cancel")?.addEventListener("click", (e) => {
+      killNavEvent(e);
       stopPicker();
       chrome.runtime.sendMessage({ type: "PICK_CANCELLED" }).catch(() => {});
     });
@@ -543,24 +848,28 @@
         chip.className = `fc-level-chip${i === STATE.pickerIndex ? " is-active" : ""}`;
         chip.setAttribute("role", "option");
         chip.setAttribute("aria-selected", i === STATE.pickerIndex ? "true" : "false");
-        const short = shortSelector(item.el);
         const kids = [...item.el.children].filter(isMeaningfulChild).length;
-        chip.textContent = short.length > 34 ? `${short.slice(0, 32)}…` : short;
+        const kind = kindLabelEs(classifyContainer(item.el));
+        chip.textContent = kind.length > 28 ? `${kind.slice(0, 26)}…` : kind;
         chip.title = levelLabel(item, i, chain.length);
         const meta = document.createElement("span");
         meta.className = "fc-level-meta";
         meta.textContent = kids ? `${kids}` : item.overflow ? "⌀" : "·";
         chip.appendChild(meta);
+        chip.addEventListener("pointerdown", (e) => {
+          killNavEvent(e);
+          STATE.pickerIndex = i;
+          renderLevelStrip();
+          placeHover(selectedEl());
+        });
         chip.addEventListener("click", (e) => {
-          e.preventDefault();
-          e.stopPropagation();
+          killNavEvent(e);
           STATE.pickerIndex = i;
           renderLevelStrip();
           placeHover(selectedEl());
         });
         chip.addEventListener("dblclick", (e) => {
-          e.preventDefault();
-          e.stopPropagation();
+          killNavEvent(e);
           confirmCurrentLevel();
         });
         levelChips.appendChild(chip);
@@ -601,8 +910,11 @@
       if (id) finishPick(id);
     };
 
+    const isPickerChrome = (target) =>
+      Boolean(target?.closest?.("#finecapture-picker-root"));
+
     STATE._onMove = (e) => {
-      if (e.target?.closest?.("#finecapture-picker-root")) {
+      if (isPickerChrome(e.target)) {
         // Keep ring on current level while using strip/banner; don't clear.
         if (e.target.closest(".fc-level-strip, .fc-picker-banner, .fc-picker-doc, .fc-picker-badge, .fc-picker-cancel")) {
           placeHover(selectedEl());
@@ -615,14 +927,28 @@
       setChainFromHit(hit);
     };
 
-    STATE._onClick = (e) => {
-      if (e.target?.closest?.("#finecapture-picker-root")) return;
-      e.preventDefault();
-      e.stopPropagation();
-      e.stopImmediatePropagation?.();
+    // Confirm on pointerdown so SPA/link navigation never starts (Wallapop cards, etc.).
+    STATE._onPointerDown = (e) => {
+      if (!STATE.picking) return;
+      if (isPickerChrome(e.target)) return;
+      if (e.button != null && e.button !== 0) return;
+      killNavEvent(e);
       const hit = document.elementFromPoint(e.clientX, e.clientY);
       setChainFromHit(hit);
       confirmCurrentLevel();
+    };
+
+    // Swallow follow-up mouse/click/auxclick so anchors and routers never navigate.
+    STATE._onSuppressNav = (e) => {
+      if (!STATE.picking) return;
+      if (isPickerChrome(e.target) && e.type !== "submit") return;
+      killNavEvent(e);
+    };
+
+    STATE._onClick = (e) => {
+      if (!STATE.picking) return;
+      if (isPickerChrome(e.target)) return;
+      killNavEvent(e);
     };
 
     STATE._onWheel = (e) => {
@@ -635,6 +961,7 @@
 
     STATE._onKey = (e) => {
       if (e.key === "Escape") {
+        e.preventDefault();
         stopPicker();
         chrome.runtime.sendMessage({ type: "PICK_CANCELLED" }).catch(() => {});
         return;
@@ -656,11 +983,25 @@
     };
 
     window.addEventListener("mousemove", STATE._onMove, true);
+    window.addEventListener("pointerdown", STATE._onPointerDown, true);
+    window.addEventListener("mousedown", STATE._onSuppressNav, true);
+    window.addEventListener("mouseup", STATE._onSuppressNav, true);
     window.addEventListener("click", STATE._onClick, true);
+    window.addEventListener("auxclick", STATE._onSuppressNav, true);
+    window.addEventListener("dblclick", STATE._onSuppressNav, true);
+    window.addEventListener("submit", STATE._onSuppressNav, true);
+    document.addEventListener("click", STATE._onClick, true);
     window.addEventListener("keydown", STATE._onKey, true);
     window.addEventListener("wheel", STATE._onWheel, { capture: true, passive: false });
 
     return { ok: true, targets: STATE.targets };
+  }
+
+  function killNavEvent(e) {
+    if (!e) return;
+    e.preventDefault();
+    e.stopPropagation();
+    e.stopImmediatePropagation?.();
   }
 
   function positionBadge(badge, el) {
@@ -670,14 +1011,59 @@
   }
 
   function finishPick(targetId) {
-    STATE.selectedId = targetId;
-    stopPicker();
-    highlightTarget(targetId);
-    chrome.storage.session.set({ fineCaptureSelectedTarget: targetId }).catch(() => {});
-    chrome.runtime.sendMessage({ type: "PICK_RESULT", targetId }).catch(() => {});
+    const meta = selectionMetaFor(targetId);
+    persistSelection(meta);
+    // Keep swallowing the synthetic click/mouseup that follows pointerdown,
+    // otherwise Wallapop/SPA cards navigate after the picker already closed.
+    armNavLock(700);
+    stopPicker({ keepNavLock: true });
+    highlightTarget(meta.targetId);
+    chrome.runtime
+      .sendMessage({
+        type: "PICK_RESULT",
+        targetId: meta.targetId,
+        label: meta.label,
+        kind: meta.kind,
+        kindLabel: meta.kindLabel,
+        fingerprint: meta.fingerprint,
+        meta
+      })
+      .catch(() => {});
   }
 
-  function stopPicker() {
+  function armNavLock(ms = 700) {
+    STATE.navLockUntil = Date.now() + ms;
+    if (STATE._onNavLock) return;
+    STATE._onNavLock = (e) => {
+      if (Date.now() > STATE.navLockUntil) {
+        clearNavLock();
+        return;
+      }
+      killNavEvent(e);
+    };
+    for (const type of ["click", "auxclick", "mouseup", "mousedown", "pointerup", "dblclick", "submit"]) {
+      window.addEventListener(type, STATE._onNavLock, true);
+      document.addEventListener(type, STATE._onNavLock, true);
+    }
+    if (STATE._navLockTimer) clearTimeout(STATE._navLockTimer);
+    STATE._navLockTimer = setTimeout(() => clearNavLock(), ms + 50);
+  }
+
+  function clearNavLock() {
+    STATE.navLockUntil = 0;
+    if (STATE._navLockTimer) {
+      clearTimeout(STATE._navLockTimer);
+      STATE._navLockTimer = null;
+    }
+    if (!STATE._onNavLock) return;
+    for (const type of ["click", "auxclick", "mouseup", "mousedown", "pointerup", "dblclick", "submit"]) {
+      window.removeEventListener(type, STATE._onNavLock, true);
+      document.removeEventListener(type, STATE._onNavLock, true);
+    }
+    STATE._onNavLock = null;
+  }
+
+  function stopPicker(options = {}) {
     STATE.picking = false;
     STATE.pickerChain = [];
     STATE.pickerIndex = 0;
@@ -690,14 +1076,28 @@
       window.removeEventListener("mousemove", STATE._onMove, true);
       STATE._onMove = null;
     }
+    if (STATE._onPointerDown) {
+      window.removeEventListener("pointerdown", STATE._onPointerDown, true);
+      STATE._onPointerDown = null;
+    }
+    if (STATE._onSuppressNav) {
+      window.removeEventListener("mousedown", STATE._onSuppressNav, true);
+      window.removeEventListener("mouseup", STATE._onSuppressNav, true);
+      window.removeEventListener("auxclick", STATE._onSuppressNav, true);
+      window.removeEventListener("dblclick", STATE._onSuppressNav, true);
+      window.removeEventListener("submit", STATE._onSuppressNav, true);
+      STATE._onSuppressNav = null;
+    }
     if (STATE._onClick) {
       window.removeEventListener("click", STATE._onClick, true);
+      document.removeEventListener("click", STATE._onClick, true);
       STATE._onClick = null;
     }
     if (STATE._onWheel) {
       window.removeEventListener("wheel", STATE._onWheel, true);
       STATE._onWheel = null;
     }
+    if (!options.keepNavLock) clearNavLock();
   }
 
   function highlightTarget(targetId) {
@@ -775,7 +1175,7 @@
     }
 
     const el = target.el;
-    const label = describeElement(el, Number(String(targetId).replace("el-", "")) || 1);
+    const label = describeElement(el);
 
     // Overflow scrollport: scroll the element itself and crop to its box.
     if (isOverflowScrollable(el)) {
@@ -1833,7 +2233,7 @@
     const text = extractStructuredText(root, { markdown: false, reverseOrder });
     const label = target.kind === "document"
       ? "Página completa (ventana)"
-      : describeElement(root, Number(String(targetId).replace("el-", "")) || 1);
+      : describeElement(root);
 
     if (!text.trim()) {
       return { ok: false, error: "No hay texto visible en la zona seleccionada." };

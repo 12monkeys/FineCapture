@@ -1,4 +1,5 @@
 const targetSelect = document.getElementById("targetSelect");
+const selectedZoneEl = document.getElementById("selectedZone");
 const scaleRange = document.getElementById("scaleRange");
 const scaleValue = document.getElementById("scaleValue");
 const hideFixed = document.getElementById("hideFixed");
@@ -19,6 +20,13 @@ const textThumb = document.getElementById("textThumb");
 const dims = document.getElementById("dims");
 
 let selectedTargetId = "document";
+let selectedMeta = {
+  targetId: "document",
+  label: "Página completa (ventana)",
+  kind: "document",
+  kindLabel: "página",
+  fingerprint: null
+};
 
 init();
 
@@ -47,7 +55,16 @@ async function init() {
   });
   targetSelect.addEventListener("change", () => {
     selectedTargetId = targetSelect.value;
-    chrome.storage.session.set({ fineCaptureSelectedTarget: selectedTargetId });
+    const opt = targetSelect.selectedOptions[0];
+    selectedMeta = {
+      targetId: selectedTargetId,
+      label: opt?.dataset.label || opt?.textContent || selectedTargetId,
+      kind: opt?.dataset.kind || (selectedTargetId === "document" ? "document" : "region"),
+      kindLabel: opt?.dataset.kindLabel || "",
+      fingerprint: opt?.dataset.fingerprint ? safeJsonParse(opt.dataset.fingerprint) : null
+    };
+    persistSelectedMeta(selectedMeta);
+    showSelectedZone(selectedMeta.label);
     highlightSelected();
   });
 
@@ -60,8 +77,16 @@ async function init() {
       setStatus(`${phaseLabel}… ${message.current}/${message.total}`);
     }
     if (message?.type === "PICK_RESULT") {
-      selectedTargetId = message.targetId;
-      ensureOptionSelected(message.targetId);
+      const meta = message.meta || {
+        targetId: message.targetId,
+        label: message.label,
+        kind: message.kind,
+        kindLabel: message.kindLabel,
+        fingerprint: message.fingerprint
+      };
+      applySelectedMeta(meta);
+      ensureOptionSelected(meta.targetId, meta.label, meta);
+      showSelectedZone(meta.label);
       setStatus("Zona seleccionada en la página.", "ok");
     }
     if (message?.type === "PICK_CANCELLED") {
@@ -69,9 +94,16 @@ async function init() {
     }
   });
 
-  const stored = await chrome.storage.session.get("fineCaptureSelectedTarget");
-  if (stored?.fineCaptureSelectedTarget) {
+  const stored = await chrome.storage.session.get([
+    "fineCaptureSelectedTarget",
+    "fineCaptureSelectedMeta"
+  ]);
+  if (stored?.fineCaptureSelectedMeta?.targetId) {
+    selectedMeta = stored.fineCaptureSelectedMeta;
+    selectedTargetId = selectedMeta.targetId;
+  } else if (stored?.fineCaptureSelectedTarget) {
     selectedTargetId = stored.fineCaptureSelectedTarget;
+    selectedMeta = { ...selectedMeta, targetId: selectedTargetId };
   }
 
   const prefs = await chrome.storage.local.get([
@@ -101,6 +133,50 @@ async function init() {
   syncModeUi();
   await loadTargets();
   await showLastCapture();
+}
+
+function safeJsonParse(value) {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+function applySelectedMeta(meta) {
+  if (!meta?.targetId) return;
+  selectedMeta = {
+    targetId: meta.targetId,
+    label: meta.label || meta.targetId,
+    kind: meta.kind || (meta.targetId === "document" ? "document" : "region"),
+    kindLabel: meta.kindLabel || "",
+    fingerprint: meta.fingerprint || null,
+    sizeLabel: meta.sizeLabel,
+    nesting: meta.nesting,
+    childCount: meta.childCount,
+    containerKind: meta.containerKind
+  };
+  selectedTargetId = selectedMeta.targetId;
+  persistSelectedMeta(selectedMeta);
+}
+
+function persistSelectedMeta(meta) {
+  chrome.storage.session.set({
+    fineCaptureSelectedTarget: meta.targetId,
+    fineCaptureSelectedMeta: meta
+  });
+}
+
+function showSelectedZone(label) {
+  if (!selectedZoneEl) return;
+  const text = label || selectedMeta.label || "";
+  if (!text) {
+    selectedZoneEl.textContent = "";
+    selectedZoneEl.hidden = true;
+    return;
+  }
+  selectedZoneEl.hidden = false;
+  selectedZoneEl.textContent = `Zona elegida: ${text}`;
 }
 
 function getMode() {
@@ -137,7 +213,7 @@ async function getActiveTab() {
   return tab;
 }
 
-const CONTENT_SCRIPT_VERSION = 11;
+const CONTENT_SCRIPT_VERSION = 12;
 
 async function ensureContent(tabId) {
   let needsInject = true;
@@ -153,6 +229,27 @@ async function ensureContent(tabId) {
   }
 }
 
+function formatOptionLabel(t) {
+  if (!t) return "Zona";
+  if (t.kind === "document") {
+    return t.label || "Página completa (ventana)";
+  }
+  // Prefer the content-script friendly label; avoid opaque class hashes.
+  return t.label || `${t.kindLabel || "Zona"} · ${t.sizeLabel || `${t.scrollHeight}px`}`;
+}
+
+function fillOption(opt, t) {
+  opt.value = t.id;
+  opt.textContent = formatOptionLabel(t);
+  opt.dataset.label = t.label || opt.textContent;
+  opt.dataset.kind = t.kind || "";
+  opt.dataset.kindLabel = t.kindLabel || "";
+  if (t.fingerprint) opt.dataset.fingerprint = JSON.stringify(t.fingerprint);
+  if (t.sizeLabel) opt.dataset.sizeLabel = t.sizeLabel;
+  if (t.nesting != null) opt.dataset.nesting = String(t.nesting);
+  if (t.childCount != null) opt.dataset.childCount = String(t.childCount);
+}
+
 async function loadTargets() {
   try {
     const tab = await getActiveTab();
@@ -164,33 +261,64 @@ async function loadTargets() {
     targetSelect.innerHTML = "";
     for (const t of res.targets) {
       const opt = document.createElement("option");
-      opt.value = t.id;
-      const kindTag = t.kind === "region" ? "región" : t.kind === "element" ? "scroll" : "página";
-      const sizeHint = t.kind === "document"
-        ? `${t.scrollHeight}px alto`
-        : `${t.scrollHeight}px · ${t.selectorHint} · ${kindTag}`;
-      opt.textContent = `${t.label} — ${sizeHint}`;
+      fillOption(opt, t);
       targetSelect.appendChild(opt);
     }
 
-    if (![...targetSelect.options].some((o) => o.value === selectedTargetId)) {
+    const resolved = await chrome.tabs.sendMessage(tab.id, {
+      type: "RESOLVE_SELECTION",
+      meta: selectedMeta?.targetId ? selectedMeta : { targetId: selectedTargetId }
+    });
+
+    if (resolved?.ok) {
+      applySelectedMeta(resolved);
+      ensureOptionSelected(resolved.targetId, resolved.label, resolved);
+    } else if (![...targetSelect.options].some((o) => o.value === selectedTargetId)) {
       selectedTargetId = "document";
+      selectedMeta = {
+        targetId: "document",
+        label: "Página completa (ventana)",
+        kind: "document",
+        kindLabel: "página",
+        fingerprint: null
+      };
+      persistSelectedMeta(selectedMeta);
     }
+
     targetSelect.value = selectedTargetId;
+    showSelectedZone(selectedMeta.label);
     setStatus(`${res.targets.length} zona(s) detectada(s).`);
+    await highlightSelected();
   } catch (error) {
     setStatus(String(error.message || error), "error");
   }
 }
 
-function ensureOptionSelected(targetId) {
-  if (![...targetSelect.options].some((o) => o.value === targetId)) {
-    const opt = document.createElement("option");
-    opt.value = targetId;
-    opt.textContent = targetId === "document" ? "Página completa (ventana)" : targetId;
+function ensureOptionSelected(targetId, label, meta = null) {
+  if (!targetId) return;
+  let opt = [...targetSelect.options].find((o) => o.value === targetId);
+  if (!opt) {
+    opt = document.createElement("option");
+    fillOption(opt, {
+      id: targetId,
+      label: label || (targetId === "document" ? "Página completa (ventana)" : targetId),
+      kind: meta?.kind || (targetId === "document" ? "document" : "region"),
+      kindLabel: meta?.kindLabel,
+      fingerprint: meta?.fingerprint,
+      sizeLabel: meta?.sizeLabel,
+      nesting: meta?.nesting,
+      childCount: meta?.childCount
+    });
     targetSelect.appendChild(opt);
+  } else if (label) {
+    opt.textContent = label;
+    opt.dataset.label = label;
+    if (meta?.kind) opt.dataset.kind = meta.kind;
+    if (meta?.kindLabel) opt.dataset.kindLabel = meta.kindLabel;
+    if (meta?.fingerprint) opt.dataset.fingerprint = JSON.stringify(meta.fingerprint);
   }
   targetSelect.value = targetId;
+  selectedTargetId = targetId;
 }
 
 async function highlightSelected() {
@@ -209,6 +337,7 @@ async function pickOnPage() {
     await ensureContent(tab.id);
     await chrome.tabs.sendMessage(tab.id, { type: "START_PICKER" });
     setStatus("Elige una zona en la página…");
+    // Close popup only; never reload or navigate the page tab.
     window.close();
   } catch (error) {
     setStatus(String(error.message || error), "error");
@@ -223,7 +352,7 @@ async function runCapture() {
   setStatus(mode === "text" ? "Extrayendo texto…" : "Preparando captura…");
 
   try {
-    selectedTargetId = targetSelect.value;
+    selectedTargetId = targetSelect.value || selectedTargetId;
     const response = await chrome.runtime.sendMessage({
       type: "START_CAPTURE",
       payload: {
