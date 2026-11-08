@@ -1,5 +1,5 @@
 (() => {
-  const FC_VERSION = 9;
+  const FC_VERSION = 11;
   if (window.__FC__?.version === FC_VERSION) return;
   if (window.__FC__?.onMessage) {
     chrome.runtime.onMessage.removeListener(window.__FC__.onMessage);
@@ -8,10 +8,13 @@
   const STATE = {
     picking: false,
     targets: [],
+    elById: new Map(),
     selectedId: null,
     capture: null,
     hiddenFixed: [],
-    hideFixedOverlays: true
+    hideFixedOverlays: true,
+    pickerChain: [],
+    pickerIndex: 0
   };
 
   function onMessage(message, _sender, sendResponse) {
@@ -67,6 +70,7 @@
   }
 
   function listScrollTargets() {
+    STATE.elById = new Map();
     const targets = [];
 
     const docEl = document.documentElement;
@@ -86,41 +90,325 @@
       scrollHeight: pageScrollHeight,
       clientHeight: pageClientHeight,
       scrollable: pageScrollHeight > pageClientHeight + 2,
-      selectorHint: "html / body"
+      selectorHint: "html / body",
+      score: 0
     });
 
+    const candidates = [];
     const walker = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_ELEMENT);
     let node = walker.currentNode;
-    let index = 0;
 
     while (node) {
-      if (node instanceof HTMLElement && isElementScrollable(node)) {
-        index += 1;
-        const rect = node.getBoundingClientRect();
-        targets.push({
-          id: `el-${index}`,
-          label: describeElement(node, index),
-          kind: "element",
-          scrollHeight: node.scrollHeight,
-          clientHeight: node.clientHeight,
-          scrollable: true,
-          selectorHint: shortSelector(node),
-          rect: { width: Math.round(rect.width), height: Math.round(rect.height) }
-        });
-        node.__fineCaptureId = `el-${index}`;
+      if (node instanceof HTMLElement) {
+        const overflow = isOverflowScrollable(node);
+        const score = scoreCaptureContainer(node);
+        const tall = Math.max(node.scrollHeight, node.offsetHeight) > pageClientHeight + 20;
+        const contentRegion = !overflow && tall && score >= 32;
+
+        if (overflow || contentRegion) {
+          candidates.push({
+            el: node,
+            overflow,
+            score: overflow ? score + 12 : score,
+            scrollHeight: Math.max(node.scrollHeight, node.offsetHeight),
+            clientHeight: overflow ? node.clientHeight : Math.min(node.clientHeight || pageClientHeight, pageClientHeight)
+          });
+        }
       }
       node = walker.nextNode();
     }
 
-    // Keep only meaningful scroll areas (limit noise)
-    return targets.filter((t) => t.kind === "document" || t.scrollHeight > t.clientHeight + 20).slice(0, 40);
+    const kept = dedupeCaptureCandidates(candidates);
+    kept.sort((a, b) => b.score - a.score || b.scrollHeight - a.scrollHeight);
+
+    let index = 0;
+    for (const item of kept.slice(0, 36)) {
+      index += 1;
+      const id = `el-${index}`;
+      const rect = item.el.getBoundingClientRect();
+      registerTargetEl(item.el, id);
+      targets.push({
+        id,
+        label: describeElement(item.el, index),
+        kind: item.overflow ? "element" : "region",
+        scrollHeight: item.scrollHeight,
+        clientHeight: item.clientHeight,
+        scrollable: item.overflow || item.scrollHeight > pageClientHeight + 2,
+        selectorHint: shortSelector(item.el),
+        score: Math.round(item.score),
+        rect: { width: Math.round(rect.width), height: Math.round(rect.height) }
+      });
+    }
+
+    return targets;
   }
 
-  function isElementScrollable(el) {
+  function registerTargetEl(el, id) {
+    el.__fineCaptureId = id;
+    STATE.elById.set(id, el);
+  }
+
+  function isOverflowScrollable(el) {
     if (!el || el === document.documentElement || el === document.body) return false;
     const style = getComputedStyle(el);
     const oy = style.overflowY;
     return /(auto|scroll|overlay)/.test(oy) && el.scrollHeight > el.clientHeight + 2;
+  }
+
+  /** @deprecated alias kept for older call sites */
+  function isElementScrollable(el) {
+    return isOverflowScrollable(el);
+  }
+
+  function isMeaningfulChild(el) {
+    if (!(el instanceof HTMLElement) || isFineCaptureUi(el)) return false;
+    const tag = el.tagName;
+    if (tag === "SCRIPT" || tag === "STYLE" || tag === "NOSCRIPT" || tag === "TEMPLATE" || tag === "BR" || tag === "HR") {
+      return false;
+    }
+    const style = getComputedStyle(el);
+    if (style.display === "none" || style.visibility === "hidden") return false;
+    return el.offsetWidth > 8 && el.offsetHeight > 8;
+  }
+
+  /**
+   * Universal score for capture containers (grids, lists, chats, feeds, articles).
+   * Prefers parents that wrap many similar items over tiny sidebars or single cards.
+   */
+  function scoreCaptureContainer(el) {
+    if (!(el instanceof HTMLElement)) return -Infinity;
+    if (el === document.body || el === document.documentElement) return -1000;
+    if (isFineCaptureUi(el)) return -Infinity;
+
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const pageH = Math.max(document.documentElement.scrollHeight, document.body?.scrollHeight || 0);
+    const w = el.offsetWidth || el.getBoundingClientRect().width;
+    const h = Math.max(el.offsetHeight, el.scrollHeight);
+    if (w < 72 || h < 72) return -100;
+
+    const style = getComputedStyle(el);
+    if (style.display === "none" || style.visibility === "hidden") return -Infinity;
+
+    let score = 0;
+    const area = w * Math.min(h, pageH);
+    score += Math.log10(area + 1) * 6;
+
+    if (h > vh * 0.85) score += 12;
+    if (h > vh * 1.4) score += 18;
+    if (h > vh * 2.5) score += 10;
+    if (w > vw * 0.32 && w < vw * 0.96) score += 12;
+    if (w >= vw * 0.5) score += 6;
+
+    if (isOverflowScrollable(el)) score += 28;
+
+    const kids = [...el.children].filter(isMeaningfulChild);
+    const n = kids.length;
+    if (n >= 3) score += Math.min(n, 60);
+    if (n >= 8) score += 12;
+
+    const heights = kids.map((k) => k.offsetHeight).filter((hh) => hh > 24);
+    if (heights.length >= 3) {
+      const sorted = [...heights].sort((a, b) => a - b);
+      const median = sorted[Math.floor(sorted.length / 2)] || 1;
+      const similar = heights.filter((hh) => Math.abs(hh - median) / median < 0.55).length;
+      score += similar * 3.5;
+    }
+
+    if (style.display === "grid" || style.display === "inline-grid") score += 32;
+    if (style.display === "flex") {
+      const dir = style.flexDirection || "";
+      if (dir.includes("column") && n >= 3) score += 14;
+      if ((dir === "row" || dir === "row-reverse") && n >= 4) score += 10;
+    }
+
+    const role = (el.getAttribute("role") || "").toLowerCase();
+    if (["list", "feed", "grid", "main", "log", "directory"].includes(role)) score += 26;
+    if (role === "listitem" || role === "article" || role === "row") score -= 18;
+
+    const aria = `${el.getAttribute("aria-label") || ""} ${el.getAttribute("aria-labelledby") || ""}`.toLowerCase();
+    const cls = typeof el.className === "string" ? el.className.toLowerCase() : "";
+    const hint = `${aria} ${cls}`;
+    if (/itemcard|item-card|result|results|grid|list|feed|message|messages|chat|conversation|thread|timeline|content|main|products|cards|catalog/.test(hint)) {
+      score += 24;
+    }
+    if (/sidebar|aside|filter|nav|menu|cookie|banner|footer|header|toolbar/.test(hint)) {
+      score -= 22;
+    }
+
+    // Thin side columns / filter rails
+    if (w < vw * 0.28) score -= 28;
+    if (h < vh * 0.45 && !isOverflowScrollable(el)) score -= 12;
+
+    // Near full-page wrappers: prefer a more specific inner container
+    if (w > vw * 0.97 && h > pageH * 0.82) score -= 45;
+    if (n <= 2 && h > vh) {
+      const grand = kids.reduce((acc, k) => acc + [...k.children].filter(isMeaningfulChild).length, 0);
+      if (grand >= 4) score += Math.min(grand, 28);
+      else score -= 8;
+    }
+
+    return score;
+  }
+
+  function dedupeCaptureCandidates(candidates) {
+    const ranked = [...candidates].sort((a, b) => b.score - a.score || b.scrollHeight - a.scrollHeight);
+    const keep = [];
+
+    for (const item of ranked) {
+      const betterDescendant = keep.find((k) => item.el.contains(k.el) && k.el !== item.el);
+      if (betterDescendant) continue;
+
+      const weakerAncestorIdx = keep.findIndex((k) => k.el.contains(item.el) && k.el !== item.el);
+      if (weakerAncestorIdx >= 0) {
+        if (item.score > keep[weakerAncestorIdx].score + 6) {
+          keep.splice(weakerAncestorIdx, 1);
+        } else {
+          continue;
+        }
+      }
+
+      const nestedSame = keep.find(
+        (k) => (k.el.contains(item.el) || item.el.contains(k.el)) && Math.abs(k.score - item.score) <= 6
+      );
+      if (nestedSame) continue;
+
+      keep.push(item);
+    }
+
+    return keep;
+  }
+
+  /**
+   * Ancestor chain of capture candidates, ordered general → specific (outer → inner).
+   * Lets the user pick section vs grid vs single card.
+   */
+  function collectAncestorChain(start) {
+    let el = start instanceof Element ? start : null;
+    if (el && el.nodeType !== Node.ELEMENT_NODE) el = el.parentElement;
+    while (el && isFineCaptureUi(el)) el = el.parentElement;
+    if (!el) return [];
+
+    const raw = [];
+    let node = el;
+    while (node && node !== document.documentElement && node !== document.body) {
+      if (node instanceof HTMLElement) {
+        const score = scoreCaptureContainer(node);
+        const overflow = isOverflowScrollable(node);
+        const vh = window.innerHeight;
+        const tall = Math.max(node.scrollHeight, node.offsetHeight) > vh + 20;
+        if (overflow || score >= 16 || (tall && score >= 8)) {
+          raw.push({ el: node, score, overflow });
+        }
+      }
+      node = node.parentElement;
+    }
+
+    // raw is inner → outer; reverse to general → specific
+    raw.reverse();
+
+    const chain = [];
+    for (const item of raw) {
+      const prev = chain[chain.length - 1];
+      if (prev) {
+        const pr = prev.el.getBoundingClientRect();
+        const r = item.el.getBoundingClientRect();
+        const similar =
+          Math.abs(pr.width - r.width) < 10 &&
+          Math.abs(pr.height - r.height) < 28 &&
+          Math.abs((prev.el.offsetHeight || 0) - (item.el.offsetHeight || 0)) < 40;
+        if (similar) {
+          if (item.score > prev.score + 3) chain[chain.length - 1] = item;
+          continue;
+        }
+      }
+      chain.push(item);
+    }
+
+    if (!chain.length && el instanceof HTMLElement) {
+      chain.push({ el, score: scoreCaptureContainer(el), overflow: isOverflowScrollable(el) });
+    }
+
+    // Cap long chains: keep ends + highest scores
+    if (chain.length > 8) {
+      const scored = chain.map((item, index) => ({ item, index, score: item.score }));
+      scored.sort((a, b) => b.score - a.score);
+      const keepIdx = new Set([0, chain.length - 1, ...scored.slice(0, 6).map((s) => s.index)]);
+      return chain.filter((_, i) => keepIdx.has(i));
+    }
+
+    return chain;
+  }
+
+  function bestIndexInChain(chain) {
+    if (!chain.length) return 0;
+    let best = 0;
+    let bestScore = -Infinity;
+    chain.forEach((item, i) => {
+      if (item.score > bestScore) {
+        bestScore = item.score;
+        best = i;
+      }
+    });
+    return best;
+  }
+
+  function chainsEqual(a, b) {
+    if (!a || !b || a.length !== b.length) return false;
+    return a.every((item, i) => item.el === b[i]?.el);
+  }
+
+  /** Walk ancestors from a clicked node and pick the best capture container. */
+  function pickBestContainer(start) {
+    const chain = collectAncestorChain(start);
+    if (!chain.length) return null;
+    return chain[bestIndexInChain(chain)].el;
+  }
+
+  function levelLabel(item, index, total) {
+    const hint = shortSelector(item.el);
+    const role = item.el.getAttribute("role");
+    const aria = item.el.getAttribute("aria-label");
+    const kids = [...item.el.children].filter(isMeaningfulChild).length;
+    const kind = item.overflow ? "scroll" : "región";
+    const detail = aria ? aria.slice(0, 28) : role ? `role=${role}` : `${kids} hijos`;
+    return `${index + 1}/${total} · ${hint} · ${detail} · ${kind}`;
+  }
+
+  function ensureTargetForElement(el) {
+    if (!el) return null;
+    if (el.__fineCaptureId && STATE.elById.get(el.__fineCaptureId) === el) {
+      return el.__fineCaptureId;
+    }
+    const targets = listScrollTargets();
+    if (el.__fineCaptureId && STATE.elById.get(el.__fineCaptureId) === el) {
+      return el.__fineCaptureId;
+    }
+    const id = `el-${STATE.elById.size + 1}`;
+    registerTargetEl(el, id);
+    const overflow = isOverflowScrollable(el);
+    STATE.targets = targets;
+    STATE.targets.push({
+      id,
+      label: describeElement(el, STATE.elById.size),
+      kind: overflow ? "element" : "region",
+      scrollHeight: Math.max(el.scrollHeight, el.offsetHeight),
+      clientHeight: overflow ? el.clientHeight : window.innerHeight,
+      scrollable: overflow || Math.max(el.scrollHeight, el.offsetHeight) > window.innerHeight + 2,
+      selectorHint: shortSelector(el),
+      score: Math.round(scoreCaptureContainer(el))
+    });
+    return id;
+  }
+
+  function findNearestOverflowScroller(el) {
+    let n = el?.parentElement;
+    while (n && n !== document.documentElement) {
+      if (n === document.body) break;
+      if (isOverflowScrollable(n)) return n;
+      n = n.parentElement;
+    }
+    return null;
   }
 
   function describeElement(el, index) {
@@ -143,12 +431,18 @@
     if (!targetId || targetId === "document") {
       return { kind: "document", el: null };
     }
-    const all = document.querySelectorAll("*");
-    for (const el of all) {
-      if (el.__fineCaptureId === targetId) return { kind: "element", el };
+    const mapped = STATE.elById.get(targetId);
+    if (mapped?.isConnected) return { kind: "element", el: mapped };
+
+    for (const el of document.querySelectorAll("*")) {
+      if (el.__fineCaptureId === targetId) {
+        STATE.elById.set(targetId, el);
+        return { kind: "element", el };
+      }
     }
-    // Rebuild map if needed
     listScrollTargets();
+    const again = STATE.elById.get(targetId);
+    if (again?.isConnected) return { kind: "element", el: again };
     for (const el of document.querySelectorAll("*")) {
       if (el.__fineCaptureId === targetId) return { kind: "element", el };
     }
@@ -158,6 +452,8 @@
   function startPicker() {
     stopPicker();
     STATE.picking = true;
+    STATE.pickerChain = [];
+    STATE.pickerIndex = 0;
     STATE.targets = listScrollTargets();
 
     const root = document.createElement("div");
@@ -165,9 +461,14 @@
     root.innerHTML = `
       <div class="fc-picker-banner">
         <strong>FineCapture</strong>
-        <span>Haz clic en la zona con scroll que quieres capturar. Esc cancela.</span>
+        <span>Pasa el ratón, usa la rueda o ↑↓ para el nivel (general → específico). Clic / Enter confirma. Esc cancela.</span>
         <button type="button" class="fc-picker-cancel">Cancelar</button>
       </div>
+      <div class="fc-level-strip" hidden>
+        <div class="fc-level-hint">Nivel de captura</div>
+        <div class="fc-level-chips" role="listbox" aria-label="Niveles de contenedor"></div>
+      </div>
+      <div class="fc-hover-ring" hidden></div>
     `;
     document.documentElement.appendChild(root);
 
@@ -179,6 +480,7 @@
       badge.type = "button";
       badge.className = "fc-picker-badge";
       badge.textContent = t.label.replace(/^Zona /, "#");
+      badge.title = `${t.selectorHint} · score ${t.score ?? "—"} · ${t.kind}`;
       badge.dataset.targetId = t.id;
       positionBadge(badge, target.el);
       root.appendChild(badge);
@@ -189,7 +491,6 @@
       });
     });
 
-    // Document option as floating chip
     const docChip = document.createElement("button");
     docChip.type = "button";
     docChip.className = "fc-picker-doc";
@@ -206,13 +507,158 @@
       chrome.runtime.sendMessage({ type: "PICK_CANCELLED" }).catch(() => {});
     });
 
+    const hoverRing = root.querySelector(".fc-hover-ring");
+    const levelStrip = root.querySelector(".fc-level-strip");
+    const levelChips = root.querySelector(".fc-level-chips");
+
+    const placeHover = (el) => {
+      if (!hoverRing) return;
+      if (!el) {
+        hoverRing.hidden = true;
+        return;
+      }
+      const rect = el.getBoundingClientRect();
+      hoverRing.hidden = false;
+      hoverRing.style.top = `${rect.top + window.scrollY}px`;
+      hoverRing.style.left = `${rect.left + window.scrollX}px`;
+      hoverRing.style.width = `${Math.max(0, rect.width)}px`;
+      hoverRing.style.height = `${Math.max(0, rect.height)}px`;
+    };
+
+    const selectedEl = () => STATE.pickerChain[STATE.pickerIndex]?.el || null;
+
+    const renderLevelStrip = () => {
+      if (!levelStrip || !levelChips) return;
+      const chain = STATE.pickerChain;
+      if (!chain.length) {
+        levelStrip.hidden = true;
+        levelChips.innerHTML = "";
+        return;
+      }
+      levelStrip.hidden = false;
+      levelChips.innerHTML = "";
+      chain.forEach((item, i) => {
+        const chip = document.createElement("button");
+        chip.type = "button";
+        chip.className = `fc-level-chip${i === STATE.pickerIndex ? " is-active" : ""}`;
+        chip.setAttribute("role", "option");
+        chip.setAttribute("aria-selected", i === STATE.pickerIndex ? "true" : "false");
+        const short = shortSelector(item.el);
+        const kids = [...item.el.children].filter(isMeaningfulChild).length;
+        chip.textContent = short.length > 34 ? `${short.slice(0, 32)}…` : short;
+        chip.title = levelLabel(item, i, chain.length);
+        const meta = document.createElement("span");
+        meta.className = "fc-level-meta";
+        meta.textContent = kids ? `${kids}` : item.overflow ? "⌀" : "·";
+        chip.appendChild(meta);
+        chip.addEventListener("click", (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          STATE.pickerIndex = i;
+          renderLevelStrip();
+          placeHover(selectedEl());
+        });
+        chip.addEventListener("dblclick", (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          confirmCurrentLevel();
+        });
+        levelChips.appendChild(chip);
+      });
+    };
+
+    const setChainFromHit = (hit) => {
+      const chain = collectAncestorChain(hit);
+      if (!chain.length) {
+        STATE.pickerChain = [];
+        STATE.pickerIndex = 0;
+        renderLevelStrip();
+        placeHover(null);
+        return;
+      }
+      if (!chainsEqual(chain, STATE.pickerChain)) {
+        STATE.pickerChain = chain;
+        STATE.pickerIndex = bestIndexInChain(chain);
+      } else {
+        STATE.pickerIndex = Math.min(STATE.pickerIndex, chain.length - 1);
+      }
+      renderLevelStrip();
+      placeHover(selectedEl());
+    };
+
+    const cycleLevel = (delta) => {
+      if (!STATE.pickerChain.length) return;
+      const n = STATE.pickerChain.length;
+      STATE.pickerIndex = (STATE.pickerIndex + delta + n) % n;
+      renderLevelStrip();
+      placeHover(selectedEl());
+    };
+
+    const confirmCurrentLevel = () => {
+      const el = selectedEl();
+      if (!el) return;
+      const id = ensureTargetForElement(el);
+      if (id) finishPick(id);
+    };
+
+    STATE._onMove = (e) => {
+      if (e.target?.closest?.("#finecapture-picker-root")) {
+        // Keep ring on current level while using strip/banner; don't clear.
+        if (e.target.closest(".fc-level-strip, .fc-picker-banner, .fc-picker-doc, .fc-picker-badge, .fc-picker-cancel")) {
+          placeHover(selectedEl());
+          return;
+        }
+        placeHover(null);
+        return;
+      }
+      const hit = document.elementFromPoint(e.clientX, e.clientY);
+      setChainFromHit(hit);
+    };
+
+    STATE._onClick = (e) => {
+      if (e.target?.closest?.("#finecapture-picker-root")) return;
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation?.();
+      const hit = document.elementFromPoint(e.clientX, e.clientY);
+      setChainFromHit(hit);
+      confirmCurrentLevel();
+    };
+
+    STATE._onWheel = (e) => {
+      if (!STATE.picking || !STATE.pickerChain.length) return;
+      if (e.target?.closest?.(".fc-picker-banner, .fc-picker-doc, .fc-picker-cancel")) return;
+      e.preventDefault();
+      e.stopPropagation();
+      cycleLevel(e.deltaY > 0 ? 1 : -1);
+    };
+
     STATE._onKey = (e) => {
       if (e.key === "Escape") {
         stopPicker();
         chrome.runtime.sendMessage({ type: "PICK_CANCELLED" }).catch(() => {});
+        return;
+      }
+      if (e.key === "ArrowDown" || e.key === "ArrowRight" || e.key === "]") {
+        e.preventDefault();
+        cycleLevel(1);
+        return;
+      }
+      if (e.key === "ArrowUp" || e.key === "ArrowLeft" || e.key === "[") {
+        e.preventDefault();
+        cycleLevel(-1);
+        return;
+      }
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        confirmCurrentLevel();
       }
     };
+
+    window.addEventListener("mousemove", STATE._onMove, true);
+    window.addEventListener("click", STATE._onClick, true);
     window.addEventListener("keydown", STATE._onKey, true);
+    window.addEventListener("wheel", STATE._onWheel, { capture: true, passive: false });
 
     return { ok: true, targets: STATE.targets };
   }
@@ -233,10 +679,24 @@
 
   function stopPicker() {
     STATE.picking = false;
+    STATE.pickerChain = [];
+    STATE.pickerIndex = 0;
     document.getElementById("finecapture-picker-root")?.remove();
     if (STATE._onKey) {
       window.removeEventListener("keydown", STATE._onKey, true);
       STATE._onKey = null;
+    }
+    if (STATE._onMove) {
+      window.removeEventListener("mousemove", STATE._onMove, true);
+      STATE._onMove = null;
+    }
+    if (STATE._onClick) {
+      window.removeEventListener("click", STATE._onClick, true);
+      STATE._onClick = null;
+    }
+    if (STATE._onWheel) {
+      window.removeEventListener("wheel", STATE._onWheel, true);
+      STATE._onWheel = null;
     }
   }
 
@@ -315,39 +775,151 @@
     }
 
     const el = target.el;
-    const totalHeight = el.scrollHeight;
-    const viewportH = el.clientHeight;
-    const rect = el.getBoundingClientRect();
+    const label = describeElement(el, Number(String(targetId).replace("el-", "")) || 1);
+
+    // Overflow scrollport: scroll the element itself and crop to its box.
+    if (isOverflowScrollable(el)) {
+      const totalHeight = el.scrollHeight;
+      const viewportH = el.clientHeight;
+      const rect = el.getBoundingClientRect();
+      const steps = Math.max(1, Math.ceil(totalHeight / Math.max(1, viewportH)));
+
+      STATE.capture = {
+        kind: "element",
+        el,
+        originalScroll: el.scrollTop,
+        pageScroll: { x: window.scrollX, y: window.scrollY },
+        totalHeight,
+        viewportH,
+        viewportW: el.clientWidth
+      };
+
+      el.scrollIntoView({ block: "center", inline: "nearest" });
+      el.scrollTop = 0;
+
+      if (STATE.hideFixedOverlays) {
+        collectOverlayElements(el);
+        setOverlaysHidden(true);
+      }
+
+      return {
+        ok: true,
+        metrics: {
+          label,
+          steps,
+          totalHeight,
+          viewportH,
+          viewportW: el.clientWidth,
+          kind: "element",
+          hideFixedOverlays: STATE.hideFixedOverlays,
+          hiddenOverlayCount: STATE.hiddenFixed.length,
+          initialRect: {
+            x: rect.left,
+            y: rect.top,
+            width: rect.width,
+            height: rect.height
+          }
+        }
+      };
+    }
+
+    // Region mode: tall non-overflow container (grids/lists/feeds).
+    // Scroll the document or nearest overflow parent and crop to the element.
+    return prepareRegionCapture(el, label);
+  }
+
+  function prepareRegionCapture(el, label) {
+    const totalHeight = Math.max(el.scrollHeight, el.offsetHeight);
+    const scrollParent = findNearestOverflowScroller(el);
+    const pageScroll = { x: window.scrollX, y: window.scrollY };
+
+    if (scrollParent) {
+      const parentRect = scrollParent.getBoundingClientRect();
+      const elRect = el.getBoundingClientRect();
+      const regionTop = elRect.top - parentRect.top + scrollParent.scrollTop;
+      const viewportH = Math.max(1, scrollParent.clientHeight);
+      const viewportW = Math.max(1, Math.min(el.clientWidth || elRect.width, scrollParent.clientWidth));
+      const steps = Math.max(1, Math.ceil(totalHeight / viewportH));
+
+      STATE.capture = {
+        kind: "region",
+        el,
+        scrollEl: scrollParent,
+        scrollMode: "parent",
+        originalScroll: scrollParent.scrollTop,
+        pageScroll,
+        regionTop,
+        totalHeight,
+        viewportH,
+        viewportW
+      };
+
+      scrollParent.scrollTop = Math.max(0, regionTop);
+      el.scrollIntoView({ block: "nearest", inline: "nearest" });
+
+      if (STATE.hideFixedOverlays) {
+        collectOverlayElements(scrollParent);
+        setOverlaysHidden(true);
+      }
+
+      const rect = el.getBoundingClientRect();
+      return {
+        ok: true,
+        metrics: {
+          label,
+          steps,
+          totalHeight,
+          viewportH,
+          viewportW,
+          kind: "region",
+          hideFixedOverlays: STATE.hideFixedOverlays,
+          hiddenOverlayCount: STATE.hiddenFixed.length,
+          initialRect: {
+            x: rect.left,
+            y: rect.top,
+            width: rect.width,
+            height: rect.height
+          }
+        }
+      };
+    }
+
+    const elRect = el.getBoundingClientRect();
+    const regionTop = elRect.top + window.scrollY;
+    const viewportH = Math.max(1, window.innerHeight);
+    const viewportW = Math.max(1, Math.min(el.offsetWidth || elRect.width, window.innerWidth));
     const steps = Math.max(1, Math.ceil(totalHeight / viewportH));
 
     STATE.capture = {
-      kind: "element",
+      kind: "region",
       el,
-      originalScroll: el.scrollTop,
-      pageScroll: { x: window.scrollX, y: window.scrollY },
+      scrollEl: document.scrollingElement || document.documentElement,
+      scrollMode: "document",
+      originalScroll: pageScroll,
+      pageScroll,
+      regionTop,
       totalHeight,
       viewportH,
-      viewportW: el.clientWidth
+      viewportW
     };
 
-    // Bring element into view horizontally/vertically for stable cropping
-    el.scrollIntoView({ block: "center", inline: "nearest" });
-    el.scrollTop = 0;
+    window.scrollTo(window.scrollX, Math.max(0, regionTop));
 
     if (STATE.hideFixedOverlays) {
-      collectOverlayElements(el);
+      collectOverlayElements(null);
       setOverlaysHidden(true);
     }
 
+    const rect = el.getBoundingClientRect();
     return {
       ok: true,
       metrics: {
-        label: describeElement(el, Number(String(targetId).replace("el-", "")) || 1),
+        label,
         steps,
         totalHeight,
         viewportH,
-        viewportW: el.clientWidth,
-        kind: "element",
+        viewportW,
+        kind: "region",
         hideFixedOverlays: STATE.hideFixedOverlays,
         hiddenOverlayCount: STATE.hiddenFixed.length,
         initialRect: {
@@ -393,6 +965,10 @@
       };
     }
 
+    if (cap.kind === "region") {
+      return scrollRegionStep(cap, step, metrics);
+    }
+
     const el = cap.el;
     const y = Math.min(step * metrics.viewportH, Math.max(0, metrics.totalHeight - metrics.viewportH));
     el.scrollTop = y;
@@ -411,6 +987,48 @@
         y: Math.max(0, rect.top),
         width: Math.min(rect.width, window.innerWidth - Math.max(0, rect.left)),
         height: Math.min(visibleH, window.innerHeight - Math.max(0, rect.top)),
+        viewportWidth: window.innerWidth,
+        viewportHeight: window.innerHeight
+      },
+      overlap: overlapCss
+    };
+  }
+
+  function scrollRegionStep(cap, step, metrics) {
+    const el = cap.el;
+    const maxOffset = Math.max(0, metrics.totalHeight - metrics.viewportH);
+    const desiredOffset = Math.min(step * metrics.viewportH, maxOffset);
+    const prevOffset = step === 0 ? 0 : Math.min((step - 1) * metrics.viewportH, maxOffset);
+
+    let actualOffset;
+    if (cap.scrollMode === "parent" && cap.scrollEl) {
+      const targetTop = cap.regionTop + desiredOffset;
+      cap.scrollEl.scrollTop = targetTop;
+      actualOffset = Math.max(0, cap.scrollEl.scrollTop - cap.regionTop);
+    } else {
+      const targetY = cap.regionTop + desiredOffset;
+      window.scrollTo(window.scrollX, targetY);
+      actualOffset = Math.max(0, window.scrollY - cap.regionTop);
+    }
+
+    const overlapCss = step === 0 ? 0 : Math.max(0, prevOffset + metrics.viewportH - actualOffset);
+    const rect = el.getBoundingClientRect();
+    const remaining = Math.max(0, metrics.totalHeight - actualOffset);
+
+    const cropX = Math.max(0, rect.left);
+    const cropY = Math.max(0, rect.top);
+    const cropRight = Math.min(window.innerWidth, rect.right);
+    const cropBottom = Math.min(window.innerHeight, rect.bottom);
+    const width = Math.max(1, cropRight - cropX);
+    const height = Math.max(1, Math.min(remaining, cropBottom - cropY, metrics.viewportH));
+
+    return {
+      ok: true,
+      crop: {
+        x: cropX,
+        y: cropY,
+        width,
+        height,
         viewportWidth: window.innerWidth,
         viewportHeight: window.innerHeight
       },
@@ -603,6 +1221,15 @@
     if (!STATE.capture) return;
     if (STATE.capture.kind === "document") {
       window.scrollTo(STATE.capture.originalScroll.x, STATE.capture.originalScroll.y);
+    } else if (STATE.capture.kind === "region") {
+      if (STATE.capture.scrollMode === "parent" && STATE.capture.scrollEl) {
+        STATE.capture.scrollEl.scrollTop = STATE.capture.originalScroll;
+      }
+      if (STATE.capture.pageScroll) {
+        window.scrollTo(STATE.capture.pageScroll.x, STATE.capture.pageScroll.y);
+      } else if (STATE.capture.scrollMode === "document" && STATE.capture.originalScroll) {
+        window.scrollTo(STATE.capture.originalScroll.x, STATE.capture.originalScroll.y);
+      }
     } else if (STATE.capture.el) {
       STATE.capture.el.scrollTop = STATE.capture.originalScroll;
       window.scrollTo(STATE.capture.pageScroll.x, STATE.capture.pageScroll.y);

@@ -43,11 +43,95 @@
 
 .fc-picker-cancel,
 .fc-picker-doc,
-.fc-picker-badge {
+.fc-picker-badge,
+.fc-level-chip {
   pointer-events: auto;
   cursor: pointer;
   border: 0;
   font: inherit;
+}
+
+.fc-level-strip {
+  position: fixed;
+  top: 72px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 2147483647;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: min(920px, calc(100vw - 24px));
+  padding: 10px 12px;
+  border: 1px solid rgba(0, 230, 170, 0.35);
+  border-radius: 12px;
+  background: rgba(10, 14, 20, 0.92);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.32);
+  pointer-events: auto;
+}
+
+.fc-level-hint {
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: rgba(232, 245, 240, 0.7);
+}
+
+.fc-level-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.fc-level-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 220px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: rgba(36, 48, 58, 0.95);
+  color: #dff7ee;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border: 1px solid transparent;
+}
+
+.fc-level-chip.is-active {
+  background: rgba(0, 200, 150, 0.95);
+  color: #041018;
+  border-color: rgba(255, 255, 255, 0.35);
+  box-shadow: 0 0 0 2px rgba(0, 230, 170, 0.35);
+}
+
+.fc-level-meta {
+  display: inline-flex;
+  min-width: 1.1em;
+  justify-content: center;
+  padding: 0 4px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.18);
+  font-size: 10px;
+  font-weight: 700;
+  opacity: 0.85;
+}
+
+.fc-level-chip.is-active .fc-level-meta {
+  background: rgba(4, 16, 24, 0.18);
+}
+
+.fc-hover-ring {
+  position: absolute;
+  z-index: 2147483645;
+  border: 2px solid #00e6aa;
+  border-radius: 10px;
+  box-shadow: 0 0 0 9999px rgba(4, 16, 24, 0.28), inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+  pointer-events: none;
+  outline: 1px dashed rgba(0, 230, 170, 0.45);
+  outline-offset: 3px;
 }
 
 .fc-picker-cancel {

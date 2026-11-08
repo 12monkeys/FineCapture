@@ -137,7 +137,7 @@ async function getActiveTab() {
   return tab;
 }
 
-const CONTENT_SCRIPT_VERSION = 9;
+const CONTENT_SCRIPT_VERSION = 11;
 
 async function ensureContent(tabId) {
   let needsInject = true;
@@ -165,9 +165,10 @@ async function loadTargets() {
     for (const t of res.targets) {
       const opt = document.createElement("option");
       opt.value = t.id;
+      const kindTag = t.kind === "region" ? "región" : t.kind === "element" ? "scroll" : "página";
       const sizeHint = t.kind === "document"
         ? `${t.scrollHeight}px alto`
-        : `${t.scrollHeight}px · ${t.selectorHint}`;
+        : `${t.scrollHeight}px · ${t.selectorHint} · ${kindTag}`;
       opt.textContent = `${t.label} — ${sizeHint}`;
       targetSelect.appendChild(opt);
     }
