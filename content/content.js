@@ -1,5 +1,5 @@
 (() => {
-  const FC_VERSION = 12;
+  const FC_VERSION = 13;
   if (window.__FC__?.version === FC_VERSION) return;
   if (window.__FC__?.onMessage) {
     chrome.runtime.onMessage.removeListener(window.__FC__.onMessage);
@@ -15,7 +15,8 @@
     hideFixedOverlays: true,
     pickerChain: [],
     pickerIndex: 0,
-    navLockUntil: 0
+    navLockUntil: 0,
+    scrollBehaviorRestore: null
   };
 
   function onMessage(message, _sender, sendResponse) {
@@ -461,6 +462,101 @@
       n = n.parentElement;
     }
     return null;
+  }
+
+  /** Full content height of a region (grids/lists), not just the visible client box. */
+  function measureElementContentHeight(el) {
+    if (!el) return 0;
+    const rect = el.getBoundingClientRect();
+    let height = Math.max(el.scrollHeight || 0, el.offsetHeight || 0, rect.height || 0);
+    try {
+      let maxChildBottom = 0;
+      const kids = el.children;
+      for (let i = 0; i < kids.length; i++) {
+        const child = kids[i];
+        if (!(child instanceof HTMLElement)) continue;
+        if (!isMeaningfulChild(child)) continue;
+        const top = child.offsetTop || 0;
+        const h = Math.max(child.offsetHeight || 0, child.scrollHeight || 0);
+        maxChildBottom = Math.max(maxChildBottom, top + h);
+      }
+      height = Math.max(height, maxChildBottom);
+    } catch {
+      /* ignore */
+    }
+    return Math.max(1, Math.round(height));
+  }
+
+  /**
+   * CSS scroll-behavior:smooth makes scrollTo/scrollTop async. Capture reads crop
+   * immediately, so overlap becomes ~viewport and stitching collapses to one slice.
+   */
+  function beginInstantScroll() {
+    if (STATE.scrollBehaviorRestore) return;
+    const html = document.documentElement;
+    const body = document.body;
+    STATE.scrollBehaviorRestore = {
+      html: html.style.getPropertyValue("scroll-behavior"),
+      htmlPriority: html.style.getPropertyPriority("scroll-behavior"),
+      body: body ? body.style.getPropertyValue("scroll-behavior") : "",
+      bodyPriority: body ? body.style.getPropertyPriority("scroll-behavior") : ""
+    };
+    html.style.setProperty("scroll-behavior", "auto", "important");
+    if (body) body.style.setProperty("scroll-behavior", "auto", "important");
+  }
+
+  function endInstantScroll() {
+    const saved = STATE.scrollBehaviorRestore;
+    if (!saved) return;
+    const html = document.documentElement;
+    const body = document.body;
+    if (saved.html) html.style.setProperty("scroll-behavior", saved.html, saved.htmlPriority || "");
+    else html.style.removeProperty("scroll-behavior");
+    if (body) {
+      if (saved.body) body.style.setProperty("scroll-behavior", saved.body, saved.bodyPriority || "");
+      else body.style.removeProperty("scroll-behavior");
+    }
+    STATE.scrollBehaviorRestore = null;
+  }
+
+  function setWindowScrollY(y) {
+    const top = Math.max(0, y);
+    const se = document.scrollingElement || document.documentElement;
+    try {
+      window.scrollTo({ top, left: window.scrollX, behavior: "instant" });
+    } catch {
+      window.scrollTo(window.scrollX, top);
+    }
+    if (se) se.scrollTop = top;
+    if (Math.abs(window.scrollY - top) > 2 && se) {
+      se.scrollTop = top;
+    }
+    return window.scrollY;
+  }
+
+  function setElementScrollTop(el, y) {
+    if (!el) return 0;
+    const top = Math.max(0, y);
+    const prev = el.style.getPropertyValue("scroll-behavior");
+    const prevPri = el.style.getPropertyPriority("scroll-behavior");
+    el.style.setProperty("scroll-behavior", "auto", "important");
+    el.scrollTop = top;
+    if (prev) el.style.setProperty("scroll-behavior", prev, prevPri || "");
+    else el.style.removeProperty("scroll-behavior");
+    return el.scrollTop;
+  }
+
+  /** Prefer an overflow parent only if it can actually reveal the full region height. */
+  function pickRegionScrollParent(el, totalHeight) {
+    const parent = findNearestOverflowScroller(el);
+    if (!parent) return null;
+    const parentRect = parent.getBoundingClientRect();
+    const elRect = el.getBoundingClientRect();
+    const regionTop = elRect.top - parentRect.top + parent.scrollTop;
+    const maxScroll = Math.max(0, parent.scrollHeight - parent.clientHeight);
+    const need = Math.max(0, regionTop + totalHeight - parent.clientHeight);
+    if (maxScroll + 2 < need) return null;
+    return parent;
   }
 
   function isHashedClass(name) {
@@ -1129,6 +1225,7 @@
 
   function prepareCapture(targetId, hideFixedOverlays = true) {
     cleanupCapture();
+    beginInstantScroll();
     const target = resolveTarget(targetId);
     STATE.hideFixedOverlays = Boolean(hideFixedOverlays);
 
@@ -1148,11 +1245,11 @@
         originalScroll: { x: window.scrollX, y: window.scrollY },
         totalHeight,
         viewportH,
-        viewportW
+        viewportW,
+        lastContentEnd: 0
       };
 
-      window.scrollTo(0, 0);
-      scrollEl.scrollTop = 0;
+      setWindowScrollY(0);
 
       if (STATE.hideFixedOverlays) {
         collectOverlayElements(null);
@@ -1179,10 +1276,10 @@
 
     // Overflow scrollport: scroll the element itself and crop to its box.
     if (isOverflowScrollable(el)) {
-      const totalHeight = el.scrollHeight;
-      const viewportH = el.clientHeight;
+      const totalHeight = Math.max(el.scrollHeight, measureElementContentHeight(el));
+      const viewportH = Math.max(1, el.clientHeight);
       const rect = el.getBoundingClientRect();
-      const steps = Math.max(1, Math.ceil(totalHeight / Math.max(1, viewportH)));
+      const steps = Math.max(1, Math.ceil(totalHeight / viewportH));
 
       STATE.capture = {
         kind: "element",
@@ -1191,11 +1288,12 @@
         pageScroll: { x: window.scrollX, y: window.scrollY },
         totalHeight,
         viewportH,
-        viewportW: el.clientWidth
+        viewportW: el.clientWidth,
+        lastContentEnd: 0
       };
 
-      el.scrollIntoView({ block: "center", inline: "nearest" });
-      el.scrollTop = 0;
+      el.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
+      setElementScrollTop(el, 0);
 
       if (STATE.hideFixedOverlays) {
         collectOverlayElements(el);
@@ -1229,17 +1327,28 @@
   }
 
   function prepareRegionCapture(el, label) {
-    const totalHeight = Math.max(el.scrollHeight, el.offsetHeight);
-    const scrollParent = findNearestOverflowScroller(el);
+    const totalHeight = measureElementContentHeight(el);
     const pageScroll = { x: window.scrollX, y: window.scrollY };
+    const scrollParent = pickRegionScrollParent(el, totalHeight);
+
+    if (STATE.hideFixedOverlays) {
+      collectOverlayElements(scrollParent || null);
+      setOverlaysHidden(true);
+    }
 
     if (scrollParent) {
       const parentRect = scrollParent.getBoundingClientRect();
       const elRect = el.getBoundingClientRect();
       const regionTop = elRect.top - parentRect.top + scrollParent.scrollTop;
-      const viewportH = Math.max(1, scrollParent.clientHeight);
-      const viewportW = Math.max(1, Math.min(el.clientWidth || elRect.width, scrollParent.clientWidth));
-      const steps = Math.max(1, Math.ceil(totalHeight / viewportH));
+      // Step by how much of the parent is actually visible in the browser viewport.
+      const visibleParentH = Math.max(
+        1,
+        Math.min(parentRect.bottom, window.innerHeight) - Math.max(0, parentRect.top)
+      );
+      const viewportH = Math.max(1, Math.min(scrollParent.clientHeight, visibleParentH, window.innerHeight));
+      const viewportW = Math.max(1, Math.min(el.clientWidth || elRect.width, scrollParent.clientWidth, window.innerWidth));
+      // +2 slack: short first crops (sticky headers) need extra steps when advancing by lastContentEnd.
+      const steps = Math.max(1, Math.ceil(totalHeight / viewportH) + 2);
 
       STATE.capture = {
         kind: "region",
@@ -1251,15 +1360,15 @@
         regionTop,
         totalHeight,
         viewportH,
-        viewportW
+        viewportW,
+        lastContentEnd: 0
       };
 
-      scrollParent.scrollTop = Math.max(0, regionTop);
-      el.scrollIntoView({ block: "nearest", inline: "nearest" });
-
-      if (STATE.hideFixedOverlays) {
-        collectOverlayElements(scrollParent);
-        setOverlaysHidden(true);
+      setElementScrollTop(scrollParent, Math.max(0, regionTop));
+      try {
+        el.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "instant" });
+      } catch {
+        el.scrollIntoView({ block: "nearest", inline: "nearest" });
       }
 
       const rect = el.getBoundingClientRect();
@@ -1272,6 +1381,7 @@
           viewportH,
           viewportW,
           kind: "region",
+          scrollMode: "parent",
           hideFixedOverlays: STATE.hideFixedOverlays,
           hiddenOverlayCount: STATE.hiddenFixed.length,
           initialRect: {
@@ -1288,7 +1398,7 @@
     const regionTop = elRect.top + window.scrollY;
     const viewportH = Math.max(1, window.innerHeight);
     const viewportW = Math.max(1, Math.min(el.offsetWidth || elRect.width, window.innerWidth));
-    const steps = Math.max(1, Math.ceil(totalHeight / viewportH));
+    const steps = Math.max(1, Math.ceil(totalHeight / viewportH) + 2);
 
     STATE.capture = {
       kind: "region",
@@ -1300,15 +1410,11 @@
       regionTop,
       totalHeight,
       viewportH,
-      viewportW
+      viewportW,
+      lastContentEnd: 0
     };
 
-    window.scrollTo(window.scrollX, Math.max(0, regionTop));
-
-    if (STATE.hideFixedOverlays) {
-      collectOverlayElements(null);
-      setOverlaysHidden(true);
-    }
+    setWindowScrollY(Math.max(0, regionTop));
 
     const rect = el.getBoundingClientRect();
     return {
@@ -1320,6 +1426,7 @@
         viewportH,
         viewportW,
         kind: "region",
+        scrollMode: "document",
         hideFixedOverlays: STATE.hideFixedOverlays,
         hiddenOverlayCount: STATE.hiddenFixed.length,
         initialRect: {
@@ -1335,6 +1442,7 @@
   function scrollToStep(targetId, step, metrics) {
     const cap = STATE.capture;
     if (!cap) throw new Error("Captura no preparada.");
+    beginInstantScroll();
 
     // Option on: hide overlays on every slice. Option off: leave page as-is.
     if (STATE.hideFixedOverlays) {
@@ -1343,8 +1451,7 @@
 
     if (cap.kind === "document") {
       const y = Math.min(step * metrics.viewportH, Math.max(0, metrics.totalHeight - metrics.viewportH));
-      window.scrollTo(0, y);
-      const actualY = window.scrollY;
+      const actualY = setWindowScrollY(y);
       const prevY = step === 0 ? 0 : Math.min((step - 1) * metrics.viewportH, Math.max(0, metrics.totalHeight - metrics.viewportH));
       const overlapCss = step === 0 ? 0 : Math.max(0, prevY + metrics.viewportH - actualY);
 
@@ -1371,8 +1478,7 @@
 
     const el = cap.el;
     const y = Math.min(step * metrics.viewportH, Math.max(0, metrics.totalHeight - metrics.viewportH));
-    el.scrollTop = y;
-    const actualY = el.scrollTop;
+    const actualY = setElementScrollTop(el, y);
     const prevY = step === 0 ? 0 : Math.min((step - 1) * metrics.viewportH, Math.max(0, metrics.totalHeight - metrics.viewportH));
     const overlapCss = step === 0 ? 0 : Math.max(0, prevY + metrics.viewportH - actualY);
 
@@ -1396,31 +1502,52 @@
 
   function scrollRegionStep(cap, step, metrics) {
     const el = cap.el;
-    const maxOffset = Math.max(0, metrics.totalHeight - metrics.viewportH);
-    const desiredOffset = Math.min(step * metrics.viewportH, maxOffset);
-    const prevOffset = step === 0 ? 0 : Math.min((step - 1) * metrics.viewportH, maxOffset);
+    const viewportH = Math.max(1, metrics.viewportH || window.innerHeight);
+    const totalHeight = Math.max(1, metrics.totalHeight || cap.totalHeight || 1);
+    const maxOffset = Math.max(0, totalHeight - 1);
+    // Advance from the last accepted content end to avoid gaps when the first crop is shorter than viewportH.
+    const desiredOffset =
+      step === 0 ? 0 : Math.min(Math.max(0, Number(cap.lastContentEnd) || step * viewportH), maxOffset);
 
-    let actualOffset;
+    // Live-anchor each step so regionTop cannot go stale after layout/overlay changes.
     if (cap.scrollMode === "parent" && cap.scrollEl) {
-      const targetTop = cap.regionTop + desiredOffset;
-      cap.scrollEl.scrollTop = targetTop;
-      actualOffset = Math.max(0, cap.scrollEl.scrollTop - cap.regionTop);
+      const parent = cap.scrollEl;
+      const parentRect = parent.getBoundingClientRect();
+      const elRect = el.getBoundingClientRect();
+      const regionTop = elRect.top - parentRect.top + parent.scrollTop;
+      cap.regionTop = regionTop;
+      setElementScrollTop(parent, regionTop + desiredOffset);
+      try {
+        parent.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "instant" });
+      } catch {
+        parent.scrollIntoView({ block: "nearest", inline: "nearest" });
+      }
     } else {
-      const targetY = cap.regionTop + desiredOffset;
-      window.scrollTo(window.scrollX, targetY);
-      actualOffset = Math.max(0, window.scrollY - cap.regionTop);
+      const elRect = el.getBoundingClientRect();
+      const liveTop = elRect.top + window.scrollY;
+      cap.regionTop = liveTop;
+      setWindowScrollY(liveTop + desiredOffset);
     }
 
-    const overlapCss = step === 0 ? 0 : Math.max(0, prevOffset + metrics.viewportH - actualOffset);
     const rect = el.getBoundingClientRect();
-    const remaining = Math.max(0, metrics.totalHeight - actualOffset);
-
     const cropX = Math.max(0, rect.left);
     const cropY = Math.max(0, rect.top);
     const cropRight = Math.min(window.innerWidth, rect.right);
     const cropBottom = Math.min(window.innerHeight, rect.bottom);
     const width = Math.max(1, cropRight - cropX);
-    const height = Math.max(1, Math.min(remaining, cropBottom - cropY, metrics.viewportH));
+    // Window-relative: captureVisibleTab is always the browser viewport.
+    // contentOffset = how far into the element the crop top is.
+    const contentOffset = Math.max(0, cropY - rect.top);
+    const remaining = Math.max(0, totalHeight - contentOffset);
+    let height = Math.max(0, cropBottom - cropY);
+    height = Math.max(1, Math.min(height, remaining, viewportH));
+
+    // Overlap from previous accepted content end (stable even if scroll was clamped).
+    const prevEnd = Number(cap.lastContentEnd) || 0;
+    const overlapCss = step === 0 ? 0 : Math.max(0, Math.min(height, prevEnd - contentOffset));
+    const nextEnd = contentOffset + height;
+    const stuck = step > 0 && nextEnd <= prevEnd + 1;
+    cap.lastContentEnd = Math.max(prevEnd, nextEnd);
 
     return {
       ok: true,
@@ -1432,7 +1559,10 @@
         viewportWidth: window.innerWidth,
         viewportHeight: window.innerHeight
       },
-      overlap: overlapCss
+      overlap: overlapCss,
+      contentOffset,
+      desiredOffset,
+      done: stuck || nextEnd >= totalHeight - 1
     };
   }
 
@@ -1618,23 +1748,28 @@
 
   function cleanupCapture() {
     restoreFixedElements();
-    if (!STATE.capture) return;
-    if (STATE.capture.kind === "document") {
-      window.scrollTo(STATE.capture.originalScroll.x, STATE.capture.originalScroll.y);
-    } else if (STATE.capture.kind === "region") {
-      if (STATE.capture.scrollMode === "parent" && STATE.capture.scrollEl) {
-        STATE.capture.scrollEl.scrollTop = STATE.capture.originalScroll;
-      }
-      if (STATE.capture.pageScroll) {
-        window.scrollTo(STATE.capture.pageScroll.x, STATE.capture.pageScroll.y);
-      } else if (STATE.capture.scrollMode === "document" && STATE.capture.originalScroll) {
+    if (STATE.capture) {
+      if (STATE.capture.kind === "document") {
+        setWindowScrollY(STATE.capture.originalScroll.y);
         window.scrollTo(STATE.capture.originalScroll.x, STATE.capture.originalScroll.y);
+      } else if (STATE.capture.kind === "region") {
+        if (STATE.capture.scrollMode === "parent" && STATE.capture.scrollEl) {
+          setElementScrollTop(STATE.capture.scrollEl, STATE.capture.originalScroll);
+        }
+        if (STATE.capture.pageScroll) {
+          setWindowScrollY(STATE.capture.pageScroll.y);
+          window.scrollTo(STATE.capture.pageScroll.x, STATE.capture.pageScroll.y);
+        } else if (STATE.capture.scrollMode === "document" && STATE.capture.originalScroll) {
+          setWindowScrollY(STATE.capture.originalScroll.y);
+          window.scrollTo(STATE.capture.originalScroll.x, STATE.capture.originalScroll.y);
+        }
+      } else if (STATE.capture.el) {
+        setElementScrollTop(STATE.capture.el, STATE.capture.originalScroll);
+        window.scrollTo(STATE.capture.pageScroll.x, STATE.capture.pageScroll.y);
       }
-    } else if (STATE.capture.el) {
-      STATE.capture.el.scrollTop = STATE.capture.originalScroll;
-      window.scrollTo(STATE.capture.pageScroll.x, STATE.capture.pageScroll.y);
+      STATE.capture = null;
     }
-    STATE.capture = null;
+    endInstantScroll();
   }
 
   const SLIDER_STATE = {

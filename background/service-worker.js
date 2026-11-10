@@ -58,7 +58,7 @@ async function getActiveTab() {
   return tab;
 }
 
-const CONTENT_SCRIPT_VERSION = 12;
+const CONTENT_SCRIPT_VERSION = 13;
 
 async function ensureContentScript(tabId) {
   let needsInject = true;
@@ -304,7 +304,7 @@ async function startImageCapture(payload) {
 
   const metrics = prep.metrics;
   const slices = [];
-  const totalSteps = metrics.steps;
+  const totalSteps = Math.max(1, Number(metrics.steps) || 1);
 
   try {
     for (let i = 0; i < totalSteps; i++) {
@@ -322,20 +322,33 @@ async function startImageCapture(payload) {
       await wait(PAINT_SETTLE_MS);
       const dataUrl = await captureVisibleTabThrottled(tab.windowId);
 
+      const useful =
+        i === 0
+          ? Math.max(0, positioned.crop?.height || 0)
+          : Math.max(0, (positioned.crop?.height || 0) - (positioned.overlap || 0));
+
+      // Skip fully overlapped duplicate frames (scroll did not advance).
+      if (i > 0 && useful <= 1) {
+        await emitProgress(i + 1, totalSteps, "page");
+        if (positioned.done) break;
+        continue;
+      }
+
       slices.push({
         dataUrl,
         crop: positioned.crop,
         overlap: positioned.overlap || 0,
-        isLast: i === totalSteps - 1
+        isLast: Boolean(positioned.done) || i === totalSteps - 1
       });
 
       await emitProgress(i + 1, totalSteps, "page");
+      if (positioned.done) break;
     }
   } finally {
     await chrome.tabs.sendMessage(tab.id, { type: "CLEANUP_CAPTURE", targetId }).catch(() => {});
   }
 
-  let stitched = await stitchInTab(tab.id, slices, scale);
+  let stitched = await stitchInTab(tab.id, slices, scale, metrics);
 
   if (sliderStrips.length) {
     stitched = await compositeSlidersInTab(tab.id, stitched, sliderStrips, scale);
@@ -346,11 +359,13 @@ async function startImageCapture(payload) {
     dataUrl: stitched.dataUrl,
     width: stitched.width,
     height: stitched.height,
-    scalePercent: Math.round(scale * 100),
+    scalePercent: Math.round((stitched.effectiveScale ?? scale) * 100),
     targetLabel: metrics.label,
     pageTitle: tab.title || "captura",
     capturedAt: Date.now(),
-    expandedSliders: sliderStrips.map((s) => s.label)
+    expandedSliders: sliderStrips.map((s) => s.label),
+    scaledToFit: Boolean(stitched.scaledToFit),
+    scaleNote: stitched.scaleNote || null
   };
 
   return saveCaptureResult(result);
@@ -370,12 +385,12 @@ async function compositeSlidersInTab(tabId, pageImage, sliderStrips, scale) {
   return result;
 }
 
-async function stitchInTab(tabId, slices, scale) {
+async function stitchInTab(tabId, slices, scale, metrics) {
   const [{ result }] = await chrome.scripting.executeScript({
     target: { tabId },
     world: "ISOLATED",
     func: stitchSlicesInPage,
-    args: [slices, scale]
+    args: [slices, scale, metrics || null]
   });
 
   if (!result?.ok) {
@@ -391,8 +406,9 @@ function clamp(n, min, max) {
 /**
  * Runs inside the page isolated world — has DOM/Canvas.
  */
-async function stitchSlicesInPage(slices, scale) {
+async function stitchSlicesInPage(slices, scale, metrics) {
   const MAX_CANVAS = 16384;
+  const MAX_AREA = 268435456; // Chrome typical canvas area limit
 
   function loadImage(dataUrl) {
     return new Promise((resolve, reject) => {
@@ -416,25 +432,68 @@ async function stitchSlicesInPage(slices, scale) {
     const dpr = images[0].width / (slices[0].crop.viewportWidth || images[0].width);
     const crop0 = slices[0].crop;
     const outWidthCss = crop0.width;
-    const outHeightCss = slices.reduce((sum, slice, i) => {
-      if (i === 0) return slice.crop.height;
-      const add = slice.crop.height - (slice.overlap || 0);
-      return sum + Math.max(0, add);
-    }, 0);
 
-    let targetW = Math.round(outWidthCss * dpr * scale);
-    let targetH = Math.round(outHeightCss * dpr * scale);
+    // Useful height per slice after removing overlap. Fully-overlapped slices add 0.
+    const sliceAddCss = slices.map((slice, i) => {
+      if (i === 0) return Math.max(0, slice.crop.height);
+      return Math.max(0, slice.crop.height - (slice.overlap || 0));
+    });
+    const outHeightCss = sliceAddCss.reduce((sum, h) => sum + h, 0);
+    const rawCropSum = slices.reduce((sum, s) => sum + Math.max(0, s.crop.height), 0);
 
-    if (targetW > MAX_CANVAS || targetH > MAX_CANVAS) {
-      const fit = Math.min(MAX_CANVAS / targetW, MAX_CANVAS / targetH, 1);
-      targetW = Math.max(1, Math.floor(targetW * fit));
-      targetH = Math.max(1, Math.floor(targetH * fit));
-      scale = scale * fit;
+    if (outHeightCss < 2) {
+      return {
+        ok: false,
+        error:
+          "La unión de capturas quedó vacía (solape total entre tramos). Suele pasar si el scroll no avanza; recarga la extensión e inténtalo de nuevo."
+      };
+    }
+
+    // Region/grid captures should roughly cover metrics.totalHeight.
+    const expectedCss = Math.max(0, Number(metrics?.totalHeight) || 0);
+    if (expectedCss > 0 && outHeightCss < expectedCss * 0.45 && slices.length > 1) {
+      return {
+        ok: false,
+        error: `La captura unida midió ~${Math.round(outHeightCss)}px pero la zona tiene ~${Math.round(expectedCss)}px. El scroll no cubrió toda la región.`
+      };
+    }
+
+    let effectiveScale = scale;
+    let targetW = Math.round(outWidthCss * dpr * effectiveScale);
+    let targetH = Math.round(outHeightCss * dpr * effectiveScale);
+    let scaledToFit = false;
+    let scaleNote = null;
+
+    const fitLimit = () => {
+      const dimFit = Math.min(MAX_CANVAS / Math.max(1, targetW), MAX_CANVAS / Math.max(1, targetH), 1);
+      const areaFit = Math.sqrt(MAX_AREA / Math.max(1, targetW * targetH));
+      return Math.min(dimFit, areaFit, 1);
+    };
+
+    let fit = fitLimit();
+    if (fit < 1) {
+      scaledToFit = true;
+      effectiveScale *= fit;
+      targetW = Math.max(1, Math.floor(outWidthCss * dpr * effectiveScale));
+      targetH = Math.max(1, Math.floor(outHeightCss * dpr * effectiveScale));
+      scaleNote = `Imagen reducida al límite del canvas (${MAX_CANVAS}px) para conservar la zona completa.`;
+      fit = fitLimit();
+      if (fit < 1) {
+        effectiveScale *= fit;
+        targetW = Math.max(1, Math.floor(outWidthCss * dpr * effectiveScale));
+        targetH = Math.max(1, Math.floor(outHeightCss * dpr * effectiveScale));
+      }
     }
 
     const canvas = document.createElement("canvas");
     canvas.width = targetW;
     canvas.height = targetH;
+    if (!canvas.width || !canvas.height) {
+      return {
+        ok: false,
+        error: "El navegador rechazó el tamaño del canvas. Prueba una escala menor en el popup."
+      };
+    }
     const ctx = canvas.getContext("2d");
     if (!ctx) return { ok: false, error: "Canvas no disponible." };
 
@@ -443,6 +502,9 @@ async function stitchSlicesInPage(slices, scale) {
 
     let destY = 0;
     for (let i = 0; i < slices.length; i++) {
+      const addCss = sliceAddCss[i];
+      if (addCss <= 0) continue;
+
       const slice = slices[i];
       const img = images[i];
       const c = slice.crop;
@@ -453,26 +515,47 @@ async function stitchSlicesInPage(slices, scale) {
       const srcW = Math.round(c.width * dpr);
       const fullSrcH = Math.round(c.height * dpr);
       const overlapPx = Math.round(overlap * dpr);
-      const srcH = i === 0 ? fullSrcH : Math.max(1, fullSrcH - overlapPx);
+      const srcH = i === 0 ? fullSrcH : Math.max(0, fullSrcH - overlapPx);
+      if (srcH <= 0) continue;
       const srcYAdj = i === 0 ? srcY : srcY + overlapPx;
 
-      const drawW = Math.round(srcW * scale);
-      const drawH = Math.round(srcH * scale);
+      const drawW = Math.max(1, Math.round(srcW * effectiveScale));
+      const drawH = Math.max(1, Math.round(srcH * effectiveScale));
+      if (destY >= canvas.height) break;
 
       ctx.drawImage(
         img,
         srcX,
-        Math.min(srcYAdj, img.height - 1),
-        Math.min(srcW, img.width - srcX),
-        Math.min(srcH, img.height - srcYAdj),
+        Math.min(srcYAdj, Math.max(0, img.height - 1)),
+        Math.min(srcW, Math.max(1, img.width - srcX)),
+        Math.min(srcH, Math.max(1, img.height - srcYAdj)),
         0,
         destY,
         drawW,
-        drawH
+        Math.min(drawH, canvas.height - destY)
       );
 
       destY += drawH;
     }
+
+    if (destY < Math.max(2, targetH * 0.35) && slices.length > 1 && rawCropSum > destY) {
+      return {
+        ok: false,
+        error: "La unión truncó casi toda la captura. Prueba recargar la extensión y capturar de nuevo."
+      };
+    }
+
+    const finish = (outCanvas) => ({
+      ok: true,
+      dataUrl: outCanvas.toDataURL("image/png"),
+      width: outCanvas.width,
+      height: outCanvas.height,
+      effectiveScale,
+      scaledToFit,
+      scaleNote,
+      expectedCss,
+      stitchedCss: outHeightCss
+    });
 
     // Trim canvas if rounding left empty space at bottom
     if (destY > 0 && destY < canvas.height) {
@@ -480,20 +563,10 @@ async function stitchSlicesInPage(slices, scale) {
       trimmed.width = canvas.width;
       trimmed.height = destY;
       trimmed.getContext("2d").drawImage(canvas, 0, 0);
-      return {
-        ok: true,
-        dataUrl: trimmed.toDataURL("image/png"),
-        width: trimmed.width,
-        height: trimmed.height
-      };
+      return finish(trimmed);
     }
 
-    return {
-      ok: true,
-      dataUrl: canvas.toDataURL("image/png"),
-      width: canvas.width,
-      height: canvas.height
-    };
+    return finish(canvas);
   } catch (error) {
     return { ok: false, error: String(error?.message || error) };
   }

@@ -213,7 +213,7 @@ async function getActiveTab() {
   return tab;
 }
 
-const CONTENT_SCRIPT_VERSION = 12;
+const CONTENT_SCRIPT_VERSION = 13;
 
 async function ensureContent(tabId) {
   let needsInject = true;
